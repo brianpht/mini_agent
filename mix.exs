@@ -4,25 +4,35 @@ defmodule MiniAgent.MixProject do
   def project do
     [
       app: :mini_agent,
-      version: "0.1.0",
+      version: "0.5.0",
       elixir: "~> 1.18",
       start_permanent: Mix.env() == :prod,
-      deps: deps()
+      elixirc_paths: elixirc_paths(Mix.env()),
+      deps: deps(),
+      escript: [main_module: MiniAgent.CLI],
+      dialyzer: [plt_add_apps: [:mix], ignore_warnings: ".dialyzer_ignore.exs"]
     ]
   end
 
-  # Run "mix help compile.app" to learn about applications.
   def application do
     [
+      mod: {MiniAgent.Application, []},
       extra_applications: [:logger]
     ]
   end
 
-  # Run "mix help deps" to learn about dependencies.
+  defp elixirc_paths(:test), do: ["lib", "test/support"]
+  defp elixirc_paths(_), do: ["lib"]
+
   defp deps do
     [
       {:req, "~> 0.5"},
-      {:jason, "~> 1.4"}
+      {:jason, "~> 1.4"},
+      {:telemetry, "~> 1.3"},
+      {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
+      {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
+      {:mox, "~> 1.2", only: :test},
+      {:stream_data, "~> 1.1", only: :test}
     ]
   end
 end

@@ -1,18 +1,194 @@
 defmodule MiniAgent do
   @moduledoc """
-  Documentation for `MiniAgent`.
+  Agent loop GenServer.
+
+  Implements a perceive -> act -> observe cycle against the configured LLM.
+  The loop terminates on DONE: in the assistant reply, max_iterations, or
+  budget exhaustion.
+
+  Start with start_link/2, then call run/1 to block until completion.
   """
 
-  @doc """
-  Hello world.
+  use GenServer
 
-  ## Examples
+  alias MiniAgent.{Budget, Memory, Permission, Tools}
 
-      iex> MiniAgent.hello()
-      :world
+  @max_iterations Application.compile_env!(:mini_agent, :max_iterations)
+  @run_timeout_ms 120_000
+  @system_prompt "You are a coding agent. Use tools to explore and modify code. Say 'DONE:' when the task is complete."
 
-  """
-  def hello do
-    :world
+  defmodule State do
+    @moduledoc false
+
+    @type t :: %__MODULE__{
+            task: String.t() | nil,
+            messages: list(map()),
+            iterations: non_neg_integer(),
+            done: boolean(),
+            output: String.t() | nil,
+            tool_calls: list(map()),
+            last: String.t() | nil,
+            budget: Budget.t() | nil,
+            mode: MiniAgent.Permission.mode()
+          }
+
+    defstruct [
+      :task,
+      :output,
+      :last,
+      :budget,
+      messages: [],
+      iterations: 0,
+      done: false,
+      tool_calls: [],
+      mode: :ask
+    ]
   end
+
+  @doc "Start the agent GenServer linked to the calling process."
+  @spec start_link(String.t(), keyword()) :: GenServer.on_start()
+  def start_link(task, opts \\ []) do
+    GenServer.start_link(__MODULE__, {task, opts})
+  end
+
+  @doc "Run the agent loop and block until done. Returns the final output string."
+  @spec run(pid()) :: String.t()
+  def run(pid) do
+    GenServer.call(pid, :run, @run_timeout_ms)
+  end
+
+  @impl GenServer
+  def init({task, opts}) do
+    state = %State{
+      task: task,
+      budget: Budget.new(),
+      mode: Keyword.get(opts, :mode, :ask)
+    }
+
+    {:ok, state}
+  end
+
+  @impl GenServer
+  def handle_call(:run, _from, state) do
+    final = loop(state)
+    {:reply, final.output || "(no output)", final}
+  end
+
+  # --- loop ---
+
+  @spec loop(State.t()) :: State.t()
+  defp loop(%State{done: true} = state), do: state
+
+  defp loop(%State{iterations: i} = state) when i >= @max_iterations do
+    %{state | done: true, output: "Max iterations (#{@max_iterations}) reached"}
+  end
+
+  defp loop(%State{} = state) do
+    if Budget.exceeded?(state.budget) do
+      :telemetry.execute(
+        [:mini_agent, :budget, :exceeded],
+        %{used: state.budget.used},
+        %{report: Budget.report(state.budget)}
+      )
+
+      %{state | done: true, output: "Budget exceeded. #{Budget.report(state.budget)}"}
+    else
+      :telemetry.execute(
+        [:mini_agent, :iteration, :start],
+        %{iteration: state.iterations},
+        %{}
+      )
+
+      state
+      |> perceive()
+      |> act()
+      |> observe()
+      |> tick()
+      |> loop()
+    end
+  end
+
+  # --- perceive ---
+
+  @spec perceive(State.t()) :: State.t()
+  defp perceive(%State{messages: []} = state) do
+    %{state | messages: [%{"role" => "user", "content" => state.task}]}
+  end
+
+  defp perceive(%State{} = state) do
+    compressed = Memory.maybe_compress(state.messages, state.budget)
+    %{state | messages: compressed}
+  end
+
+  # --- act ---
+
+  @spec act(State.t()) :: State.t()
+  defp act(%State{done: true} = state), do: state
+
+  defp act(%State{} = state) do
+    mod = llm_module()
+
+    case mod.chat(state.messages, system: @system_prompt, tools: Tools.definitions()) do
+      {:ok, resp} ->
+        tokens = mod.usage(resp)
+        calls = mod.extract_tool_calls(resp)
+        text = mod.extract_text(resp)
+        assistant = %{"role" => "assistant", "content" => resp["content"]}
+
+        %{
+          state
+          | messages: state.messages ++ [assistant],
+            tool_calls: calls,
+            last: text,
+            output: text,
+            budget: Budget.add(state.budget, tokens)
+        }
+
+      {:error, reason} ->
+        %{state | done: true, output: "LLM error: #{reason}"}
+    end
+  end
+
+  # --- observe ---
+
+  @spec observe(State.t()) :: State.t()
+  defp observe(%State{done: true} = state), do: state
+
+  defp observe(%State{tool_calls: [_ | _] = calls} = state) do
+    results =
+      Enum.map(calls, fn call ->
+        tool_name = call["name"]
+        tool_input = call["input"]
+
+        output =
+          case Permission.check(tool_name, tool_input, state.mode) do
+            :allow -> Tools.execute(tool_name, tool_input)
+            {:deny, reason} -> "Denied: #{reason}"
+          end
+
+        %{"type" => "tool_result", "tool_use_id" => call["id"], "content" => output}
+      end)
+
+    tool_msg = %{"role" => "user", "content" => results}
+    %{state | messages: state.messages ++ [tool_msg], tool_calls: []}
+  end
+
+  defp observe(%State{last: last} = state) when is_binary(last) do
+    if String.starts_with?(String.trim(last), "DONE:") do
+      %{state | done: true}
+    else
+      continue_msg = %{"role" => "user", "content" => "Continue."}
+      %{state | messages: state.messages ++ [continue_msg]}
+    end
+  end
+
+  defp observe(state), do: state
+
+  # --- tick ---
+
+  @spec tick(State.t()) :: State.t()
+  defp tick(state), do: %{state | iterations: state.iterations + 1}
+
+  @spec llm_module() :: module()
+  defp llm_module, do: Application.fetch_env!(:mini_agent, :llm_module)
 end
