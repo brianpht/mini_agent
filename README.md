@@ -13,8 +13,9 @@ with Mox - no API key required for the test suite.
 Two LLM backends are included out of the box:
 
 - **`MiniAgent.LLM.DeepSeek`** (default) - OpenAI-compatible endpoint, requires `DEEPSEEK_API_KEY`
+  - Real-time token streaming via OpenAI SSE format (`--stream` flag)
 - **`MiniAgent.LLM.Anthropic`** - Anthropic Claude API, requires `ANTHROPIC_API_KEY`
-  - Streaming: tokens appear on terminal as they arrive via SSE (`--stream` flag)
+  - Real-time token streaming via Anthropic SSE format (`--stream` flag)
 
 ---
 
@@ -25,13 +26,14 @@ flowchart TD
     CLI["MiniAgent.CLI\nescript entry"] -->|default| GS["MiniAgent\nGenServer"]
     CLI -->|--parallel| ORC["MiniAgent.Orchestrator\nplan + fan-out + synthesize"]
     GS -->|perceive| MEM["MiniAgent.Memory\ncontext compression"]
-    GS -->|act| BEH["MiniAgent.LLMBehaviour\ninterface"]
-    BEH --> ANT["MiniAgent.LLM.Anthropic\nClaude API + SSE streaming"]
+    GS -->|act| BEH["MiniAgent.LLM.Behaviour\ninterface"]
+    BEH --> ANT["MiniAgent.LLM.Anthropic\nClaude API"]
     BEH --> DS["MiniAgent.LLM.DeepSeek\nOpenAI-compat API"]
-    ANT -.->|streaming| SP["MiniAgent.LLM.StreamParser\nSSE event parser"]
+    ANT -.->|streaming| ASP["MiniAgent.LLM.AnthropicStreamParser\nAnthropic SSE parser"]
+    DS -.->|streaming| DSP["MiniAgent.LLM.DeepSeekStreamParser\nOpenAI SSE parser"]
     GS -->|observe| PERM["MiniAgent.Permission\npermission gate"]
     PERM --> TOOLS["MiniAgent.Tools\ndispatcher"]
-    TOOLS --> FT["FileTools\nread/write/list"]
+    TOOLS --> FT["FileTool\nread/write/list"]
     TOOLS --> ST["ShellTool\nwhitelist exec"]
     TOOLS -->|delegate tool| ORC
     ORC -->|async_nolink x N| SUB["MiniAgent.SubAgent\npure-function loop"]
@@ -47,17 +49,18 @@ lib/
   mini_agent.ex                  # GenServer - main loop
   mini_agent/
     application.ex               # OTP Application + Task.Supervisor
-    llm_behaviour.ex             # @callback contracts (enables Mox injection)
     llm/
+      behaviour.ex               # @callback contracts (enables Mox injection)
       anthropic.ex               # Anthropic Claude API client + SSE streaming
+      anthropic_stream_parser.ex # Pure SSE parser - Anthropic event format
       deepseek.ex                # DeepSeek API client (OpenAI-compat adapter)
-      stream_parser.ex           # Pure SSE event parser (Anthropic streaming)
+      deepseek_stream_parser.ex  # Pure SSE parser - OpenAI event format
     budget.ex                    # Token quota - pure struct
     memory.ex                    # Context compression (token-based threshold)
     permission.ex                # :auto | :ask | :readonly gate
     tools.ex                     # Tool registry and dispatcher (incl. delegate)
     tools/
-      file_tools.ex              # read_file, write_file, list_dir
+      file_tool.ex               # read_file, write_file, list_dir
       shell_tool.ex              # Whitelisted shell commands
     sub_agent.ex                 # Lightweight pure-function agent loop
     orchestrator.ex              # plan -> parallel fan-out -> synthesize
@@ -74,8 +77,8 @@ lib/
 
 | Backend | Env var | Notes |
 |---------|---------|-------|
-| `MiniAgent.LLM.DeepSeek` (default) | `DEEPSEEK_API_KEY` | OpenAI-compatible endpoint |
-| `MiniAgent.LLM.Anthropic` | `ANTHROPIC_API_KEY` | Anthropic Claude API, supports real-time streaming |
+| `MiniAgent.LLM.DeepSeek` (default) | `DEEPSEEK_API_KEY` | OpenAI-compatible endpoint, real-time streaming |
+| `MiniAgent.LLM.Anthropic` | `ANTHROPIC_API_KEY` | Anthropic Claude API, real-time streaming |
 
 ---
 
@@ -108,12 +111,19 @@ source .env
 # Readonly mode - blocks write_file and shell
 ./mini_agent --mode readonly "List all files under lib/"
 
+# Streaming - tokens appear on terminal as they arrive (DeepSeek SSE)
+./mini_agent --stream --mode readonly "What does the Budget module do?"
+
 # Orchestrator mode - decomposes task into parallel sub-agents
 ./mini_agent --parallel --mode readonly \
   "Analyse this codebase: architecture, tools available, and budget management"
+
+# Combine: streaming + orchestrator
+./mini_agent --stream --parallel --mode readonly \
+  "Describe the LLM layer and list all tools"
 ```
 
-### Anthropic backend (with real-time streaming)
+### Anthropic backend
 
 Edit `config/config.exs`:
 
@@ -129,10 +139,10 @@ export ANTHROPIC_API_KEY="sk-ant-..."
 # Standard run
 ./mini_agent "Read lib/mini_agent.ex and summarise the architecture"
 
-# Streaming - tokens appear on terminal as they arrive
+# Streaming - tokens appear on terminal as they arrive (Anthropic SSE)
 ./mini_agent --stream "Explain how the agent loop works"
 
-# Orchestrator mode (sub-agents run non-streaming internally)
+# Orchestrator mode
 ./mini_agent --parallel --mode readonly \
   "Analyse architecture, tools, and budget in parallel"
 ```
@@ -175,11 +185,11 @@ All values live in `config/config.exs` and are resolved at compile time via
 
 Available `:llm_module` values:
 
-| Module | Notes |
-|--------|-------|
-| `MiniAgent.LLM.DeepSeek` | Default. No token streaming (full response at once) |
-| `MiniAgent.LLM.Anthropic` | Real-time token streaming via SSE (`--stream` flag) |
-| `MiniAgent.MockLLM` | Test environment only - Mox double, no network |
+| Module | Streaming | Notes |
+|--------|-----------|-------|
+| `MiniAgent.LLM.DeepSeek` | OpenAI SSE | Default. `DEEPSEEK_API_KEY` required |
+| `MiniAgent.LLM.Anthropic` | Anthropic SSE | `ANTHROPIC_API_KEY` required |
+| `MiniAgent.MockLLM` | N/A | Test environment only - Mox double, no network |
 
 ---
 
@@ -193,7 +203,7 @@ Available `:llm_module` values:
 |------|-------|-------------|
 | `--auto` | `-a` | Approve all tool calls silently (`:auto` mode) |
 | `--mode readonly` | `-m readonly` | Block `write_file` and `shell` (`:readonly` mode) |
-| `--stream` | `-s` | Enable real-time token streaming (Anthropic backend only) |
+| `--stream` | `-s` | Enable real-time token streaming (both backends) |
 | `--parallel` | `-p` | Orchestrator mode: decompose task into parallel sub-agents |
 
 Flags can be combined: `--stream --parallel --mode readonly`.
@@ -239,13 +249,14 @@ All commands are sandboxed to `:workspace`. Output is capped at 4 000 bytes.
 
 ---
 
-## Streaming (Anthropic only)
+## Streaming
 
 When `--stream` is passed (or `stream: true` in `start_link/2`), the agent calls
-`LLMBehaviour.chat_stream/3` instead of `chat/2`. Text tokens are printed to the
-terminal as each SSE chunk arrives.
+`MiniAgent.LLM.Behaviour.chat_stream/3` instead of `chat/2`. Text tokens are printed
+to the terminal as each SSE chunk arrives. Both backends support real-time streaming
+with dedicated pure-function SSE parsers.
 
-Internally, `MiniAgent.LLM.StreamParser` handles the Anthropic SSE event stream:
+### Anthropic SSE format (`AnthropicStreamParser`)
 
 | Event | Action |
 |-------|--------|
@@ -256,13 +267,26 @@ Internally, `MiniAgent.LLM.StreamParser` handles the Anthropic SSE event stream:
 | `content_block_stop` | Finalizes tool call with parsed JSON input |
 | `message_delta` | Accumulates output token count and stop reason |
 
-The final state is converted to an Anthropic-format response map via
-`StreamParser.to_response/1`, so the agent loop processes streamed and non-streamed
-responses identically.
+### OpenAI SSE format (`DeepSeekStreamParser`)
 
-DeepSeek's `chat_stream/3` is a non-streaming fallback: it calls `chat/2` and emits
-the full response text in one `on_chunk` call. Token-by-token UX requires the
-Anthropic backend.
+| Event | Action |
+|-------|--------|
+| `choices[].delta.content` | Emits text chunk immediately to terminal |
+| `choices[].delta.tool_calls[index]` | Accumulates tool id/name/args per slot index |
+| `choices[].finish_reason` | Records stop reason |
+| `usage.prompt_tokens` / `completion_tokens` | Accumulates token counts (final chunk) |
+| `data: [DONE]` | End-of-stream terminator, no-op |
+
+Both parsers convert their accumulated state to the same internal Anthropic-like
+response map via `to_response/1`, so the agent loop processes streamed and
+non-streamed responses identically.
+
+All SSE parsing is implemented with binary pattern matching on `"data: " <> json`
+lines - no byte-by-byte parsing, no atoms created at runtime.
+
+The Req `:into` callback streams raw HTTP body chunks into a short-lived `Agent`
+(started under `MiniAgent.TaskSupervisor`) that accumulates parser state. The
+`Agent` is always stopped in an `after` block, preventing leaks on network errors.
 
 ---
 
@@ -375,12 +399,13 @@ key is overridden to `MiniAgent.MockLLM` (a Mox double) in the test environment
 via `config/test.exs`.
 
 ```bash
-mix test                                              # all tests
-mix test test/mini_agent_test.exs                     # integration tests only
-mix test test/mini_agent/budget_test.exs              # unit tests for a single module
-mix test test/mini_agent/llm/stream_parser_test.exs   # StreamParser unit tests
-mix test test/mini_agent/sub_agent_test.exs           # SubAgent unit tests
-mix test test/mini_agent/orchestrator_test.exs        # Orchestrator unit tests
+mix test                                                        # all tests
+mix test test/mini_agent_test.exs                               # integration tests only
+mix test test/mini_agent/budget_test.exs                        # unit tests for a single module
+mix test test/mini_agent/llm/anthropic_stream_parser_test.exs   # Anthropic SSE parser unit tests
+mix test test/mini_agent/llm/deepseek_stream_parser_test.exs    # DeepSeek SSE parser unit tests
+mix test test/mini_agent/sub_agent_test.exs                     # SubAgent unit tests
+mix test test/mini_agent/orchestrator_test.exs                  # Orchestrator unit tests
 ```
 
 Test categories:
@@ -394,7 +419,8 @@ Test categories:
 | `tools_test.exs` | Unit | Dispatcher, file read/write in tmp/ |
 | `llm_test.exs` | Unit | `extract_text`, `extract_tool_calls`, `usage` for Anthropic |
 | `llm/deepseek_test.exs` | Unit | `extract_text`, `extract_tool_calls`, `usage` for DeepSeek |
-| `llm/stream_parser_test.exs` | Unit | SSE parsing, tool lifecycle, token counting, round-trip |
+| `llm/anthropic_stream_parser_test.exs` | Unit | Anthropic SSE parsing, tool lifecycle, token counting, round-trip |
+| `llm/deepseek_stream_parser_test.exs` | Unit | OpenAI SSE parsing, tool slot accumulation, round-trip |
 | `sub_agent_test.exs` | Unit | Loop termination, tool execution, budget/iteration caps |
 | `orchestrator_test.exs` | Unit | Plan/fanout/synthesize phases, failure fallbacks |
 
@@ -410,7 +436,7 @@ Test categories:
 | 4 | Permission gate + token budget | Done |
 | 5 | Shell tool + telemetry logger + CLI | Done |
 | 6 | DeepSeek backend (OpenAI-compat adapter) | Done |
-| 7 | Streaming token real-time (Anthropic SSE) | Done |
+| 7 | Real-time streaming - Anthropic SSE + DeepSeek SSE | Done |
 | 8 | Sub-agents + Orchestrator (parallel fan-out) | Done |
 | 9 | Checkpoint and resume (save/restore agent state) | Planned |
 | 10 | MCP integration (Model Context Protocol tools) | Planned |

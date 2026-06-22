@@ -1,7 +1,7 @@
 defmodule MiniAgent.Tools do
   @moduledoc "Tool registry, Anthropic schema definitions, and dispatcher."
 
-  alias MiniAgent.Tools.{FileTools, ShellTool}
+  alias MiniAgent.Tools.{FileTool, ShellTool}
 
   @type tool_name :: String.t()
   @type tool_input :: map()
@@ -64,19 +64,19 @@ defmodule MiniAgent.Tools do
   @doc "Dispatch tool execution by name. Uses static pattern matching - no apply/3."
   @spec execute(tool_name(), tool_input()) :: tool_result()
   def execute("read_file", input) do
-    result = FileTools.read_file(input)
+    result = FileTool.read_file(input)
     emit(:telemetry, "read_file")
     result
   end
 
   def execute("list_dir", input) do
-    result = FileTools.list_dir(input)
+    result = FileTool.list_dir(input)
     emit(:telemetry, "list_dir")
     result
   end
 
   def execute("write_file", input) do
-    result = FileTools.write_file(input)
+    result = FileTool.write_file(input)
     emit(:telemetry, "write_file")
     result
   end

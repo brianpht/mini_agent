@@ -1,26 +1,28 @@
 defmodule MiniAgent.LLM.DeepSeek do
   @moduledoc """
-  DeepSeek API client (OpenAI-compatible endpoint). Implements MiniAgent.LLMBehaviour.
+  DeepSeek API client (OpenAI-compatible endpoint). Implements MiniAgent.LLM.Behaviour.
 
   Translates between the internal Anthropic-like message format used by the agent loop
   and the OpenAI Chat Completions format expected by DeepSeek. All format conversions
   are confined to this module - the agent loop requires no changes.
 
-  Streaming: chat_stream/3 is a non-streaming fallback. It calls chat/2 and emits
-  the full response text in one on_chunk call. Token-by-token streaming UX requires
-  implementing SSE parsing for the OpenAI streaming format (stream: true). Use
-  MiniAgent.LLM.Anthropic for real-time token streaming.
+  Streaming: chat_stream/3 uses real token-by-token SSE streaming via the OpenAI
+  streaming format (stream: true, data: [DONE] terminator). Parsed by
+  MiniAgent.LLM.DeepSeekStreamParser. The Agent accumulator pattern is used to
+  carry parser state across Req :into callbacks.
 
   Required env var: DEEPSEEK_API_KEY
   """
 
-  @behaviour MiniAgent.LLMBehaviour
+  @behaviour MiniAgent.LLM.Behaviour
+
+  alias MiniAgent.LLM.DeepSeekStreamParser
 
   @url "https://api.deepseek.com/v1/chat/completions"
   @model Application.compile_env!(:mini_agent, :model)
   @max_tokens Application.compile_env!(:mini_agent, :max_tokens)
 
-  @impl MiniAgent.LLMBehaviour
+  @impl MiniAgent.LLM.Behaviour
   @spec chat(list(map()), keyword()) :: {:ok, map()} | {:error, String.t()}
   def chat(messages, opts \\ []) do
     oai_messages = to_openai_messages(messages, opts[:system])
@@ -37,25 +39,51 @@ defmodule MiniAgent.LLM.DeepSeek do
     end
   end
 
-  @impl MiniAgent.LLMBehaviour
+  @impl MiniAgent.LLM.Behaviour
   @spec chat_stream(list(map()), (String.t() -> :ok), keyword()) ::
           {:ok, map()} | {:error, String.t()}
   def chat_stream(messages, on_chunk, opts \\ []) when is_function(on_chunk, 1) do
-    # DeepSeek uses OpenAI-compatible SSE format. Delegate to non-streaming
-    # chat/2 and call on_chunk once with the full text to satisfy the contract.
-    # A full SSE implementation can be added when DeepSeek streaming is needed.
-    case chat(messages, opts) do
-      {:ok, resp} ->
-        text = extract_text(resp)
-        if text != "", do: on_chunk.(text)
-        {:ok, resp}
+    oai_messages = to_openai_messages(messages, opts[:system])
+    oai_tools = opts[:tools] && Enum.map(opts[:tools], &to_openai_tool/1)
 
-      {:error, _} = err ->
-        err
+    body =
+      %{model: @model, max_tokens: @max_tokens, messages: oai_messages, stream: true}
+      |> maybe_put(:tools, oai_tools)
+
+    # Agent accumulates DeepSeekStreamParser state across SSE chunks.
+    # on_chunk is called in the into: callback (calling process), not in Agent process.
+    # rescue/reraise ensures Agent is always stopped even if Req.post raises.
+    {:ok, agent} = Agent.start_link(fn -> DeepSeekStreamParser.new() end)
+
+    result =
+      try do
+        Req.post(@url,
+          json: body,
+          headers: stream_headers(),
+          receive_timeout: 120_000,
+          into: fn {:data, data}, {req, resp} ->
+            chunks = Agent.get_and_update(agent, &collect_sse_chunks(data, &1))
+            Enum.each(chunks, on_chunk)
+            {:cont, {req, resp}}
+          end
+        )
+      rescue
+        e ->
+          Agent.stop(agent)
+          reraise e, __STACKTRACE__
+      end
+
+    final = Agent.get(agent, & &1)
+    Agent.stop(agent)
+
+    case result do
+      {:ok, %{status: 200}} -> {:ok, DeepSeekStreamParser.to_response(final)}
+      {:ok, %{status: s, body: e}} -> {:error, "HTTP #{s}: #{inspect(e)}"}
+      {:error, reason} -> {:error, "Network: #{inspect(reason)}"}
     end
   end
 
-  @impl MiniAgent.LLMBehaviour
+  @impl MiniAgent.LLM.Behaviour
   @spec extract_text(map()) :: String.t()
   def extract_text(%{"content" => content}) when is_list(content) do
     content
@@ -65,7 +93,7 @@ defmodule MiniAgent.LLM.DeepSeek do
 
   def extract_text(_), do: ""
 
-  @impl MiniAgent.LLMBehaviour
+  @impl MiniAgent.LLM.Behaviour
   @spec extract_tool_calls(map()) :: list(map())
   def extract_tool_calls(%{"content" => content}) when is_list(content) do
     Enum.filter(content, &(&1["type"] == "tool_use"))
@@ -73,7 +101,7 @@ defmodule MiniAgent.LLM.DeepSeek do
 
   def extract_tool_calls(_), do: []
 
-  @impl MiniAgent.LLMBehaviour
+  @impl MiniAgent.LLM.Behaviour
   @spec usage(map()) :: non_neg_integer()
   def usage(%{"usage" => %{"input_tokens" => i, "output_tokens" => o}}), do: i + o
 
@@ -237,11 +265,44 @@ defmodule MiniAgent.LLM.DeepSeek do
   # Helpers
   # ---------------------------------------------------------------------------
 
+  # Parses all SSE lines in one data chunk.
+  # Returns {text_chunks, new_parser} for use with Agent.get_and_update.
+  # on_chunk is called from the into: callback (calling process), not from Agent.
+  @spec collect_sse_chunks(String.t(), DeepSeekStreamParser.t()) ::
+          {list(String.t()), DeepSeekStreamParser.t()}
+  defp collect_sse_chunks(data, parser) do
+    {final_parser, chunks_rev} =
+      data
+      |> String.split("\n")
+      |> Enum.reduce({parser, []}, fn line, {acc_parser, acc_chunks} ->
+        {new_parser, effect} = DeepSeekStreamParser.handle_line(acc_parser, String.trim(line))
+
+        new_chunks =
+          case effect do
+            {:text, chunk} -> [chunk | acc_chunks]
+            :none -> acc_chunks
+          end
+
+        {new_parser, new_chunks}
+      end)
+
+    {Enum.reverse(chunks_rev), final_parser}
+  end
+
   @spec headers() :: list({String.t(), String.t()})
   defp headers do
     [
       {"authorization", "Bearer #{System.fetch_env!("DEEPSEEK_API_KEY")}"},
       {"content-type", "application/json"}
+    ]
+  end
+
+  @spec stream_headers() :: list({String.t(), String.t()})
+  defp stream_headers do
+    [
+      {"authorization", "Bearer #{System.fetch_env!("DEEPSEEK_API_KEY")}"},
+      {"content-type", "application/json"},
+      {"accept", "text/event-stream"}
     ]
   end
 

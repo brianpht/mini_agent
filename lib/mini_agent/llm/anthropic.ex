@@ -1,15 +1,15 @@
 defmodule MiniAgent.LLM.Anthropic do
-  @moduledoc "Anthropic Claude API client. Implements MiniAgent.LLMBehaviour."
+  @moduledoc "Anthropic Claude API client. Implements MiniAgent.LLM.Behaviour."
 
-  @behaviour MiniAgent.LLMBehaviour
+  @behaviour MiniAgent.LLM.Behaviour
 
-  alias MiniAgent.LLM.StreamParser
+  alias MiniAgent.LLM.AnthropicStreamParser, as: StreamParser
 
   @url "https://api.anthropic.com/v1/messages"
   @model Application.compile_env!(:mini_agent, :model)
   @max_tokens Application.compile_env!(:mini_agent, :max_tokens)
 
-  @impl MiniAgent.LLMBehaviour
+  @impl MiniAgent.LLM.Behaviour
   @spec chat(list(map()), keyword()) :: {:ok, map()} | {:error, String.t()}
   def chat(messages, opts \\ []) do
     body =
@@ -24,7 +24,7 @@ defmodule MiniAgent.LLM.Anthropic do
     end
   end
 
-  @impl MiniAgent.LLMBehaviour
+  @impl MiniAgent.LLM.Behaviour
   @spec chat_stream(list(map()), (String.t() -> :ok), keyword()) ::
           {:ok, map()} | {:error, String.t()}
   def chat_stream(messages, on_chunk, opts \\ []) when is_function(on_chunk, 1) do
@@ -67,7 +67,7 @@ defmodule MiniAgent.LLM.Anthropic do
     end
   end
 
-  @impl MiniAgent.LLMBehaviour
+  @impl MiniAgent.LLM.Behaviour
   @spec extract_text(map()) :: String.t()
   def extract_text(%{"content" => content}) when is_list(content) do
     content
@@ -77,7 +77,7 @@ defmodule MiniAgent.LLM.Anthropic do
 
   def extract_text(_), do: ""
 
-  @impl MiniAgent.LLMBehaviour
+  @impl MiniAgent.LLM.Behaviour
   @spec extract_tool_calls(map()) :: list(map())
   def extract_tool_calls(%{"content" => content}) when is_list(content) do
     Enum.filter(content, &(&1["type"] == "tool_use"))
@@ -85,7 +85,7 @@ defmodule MiniAgent.LLM.Anthropic do
 
   def extract_tool_calls(_), do: []
 
-  @impl MiniAgent.LLMBehaviour
+  @impl MiniAgent.LLM.Behaviour
   @spec usage(map()) :: non_neg_integer()
   def usage(%{"usage" => %{"input_tokens" => i, "output_tokens" => o}}), do: i + o
 

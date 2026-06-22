@@ -1,2 +1,2 @@
 ExUnit.start()
-Mox.defmock(MiniAgent.MockLLM, for: MiniAgent.LLMBehaviour)
+Mox.defmock(MiniAgent.MockLLM, for: MiniAgent.LLM.Behaviour)
