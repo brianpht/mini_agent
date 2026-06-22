@@ -7,7 +7,7 @@ defmodule MiniAgent.Tools do
   @type tool_input :: map()
   @type tool_result :: String.t()
 
-  @doc "Anthropic-format tool schema list sent with each LLM request."
+  @doc "Tool schema list sent with each LLM request."
   @spec definitions() :: list(map())
   def definitions do
     [

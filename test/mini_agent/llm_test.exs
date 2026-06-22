@@ -1,7 +1,7 @@
 defmodule MiniAgent.LLMTest do
   use ExUnit.Case, async: true
 
-  alias MiniAgent.LLM
+  alias MiniAgent.LLM.Anthropic, as: LLM
 
   @text_response %{
     "content" => [

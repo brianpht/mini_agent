@@ -1,4 +1,4 @@
-defmodule MiniAgent.LLM do
+defmodule MiniAgent.LLM.Anthropic do
   @moduledoc "Anthropic Claude API client. Implements MiniAgent.LLMBehaviour."
 
   @behaviour MiniAgent.LLMBehaviour
