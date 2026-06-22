@@ -14,7 +14,13 @@ defmodule MiniAgent.SubAgent do
 
   @max_iter 5
   @sub_budget 15_000
-  @system_prompt "You are a focused sub-agent completing exactly one specific task. Use tools as needed. When done, reply starting with 'DONE:' followed by a concise summary of what you found or did."
+  @system_prompt """
+  You are a focused sub-agent completing exactly one specific task.
+  Use tools as needed, but do not repeat the same tool call with the same arguments.
+  Once you have the information required, answer directly.
+  When done, include 'DONE:' in your response followed by a concise summary of what you found or did.
+  Example: "DONE: The lib/ directory contains 12 files including mini_agent.ex and budget.ex."
+  """
 
   @type sub_state :: %{
           messages: list(map()),
@@ -90,15 +96,20 @@ defmodule MiniAgent.SubAgent do
 
         cond do
           calls != [] ->
-            results = execute_tools(calls, s.mode)
+            results = execute_tools(calls, s.mode, s.iter)
             tool_msg = %{"role" => "user", "content" => results}
             %{s | messages: s.messages ++ [tool_msg]}
 
-          String.starts_with?(String.trim(text), "DONE:") ->
+          String.contains?(text, "DONE:") ->
             %{s | done: true}
 
           true ->
-            continue_msg = %{"role" => "user", "content" => "Continue."}
+            continue_msg = %{
+              "role" => "user",
+              "content" =>
+                "Continue working. When done, include 'DONE:' in your response followed by your answer."
+            }
+
             %{s | messages: s.messages ++ [continue_msg]}
         end
 
@@ -107,17 +118,31 @@ defmodule MiniAgent.SubAgent do
     end
   end
 
-  @spec execute_tools(list(map()), Permission.mode()) :: list(map())
-  defp execute_tools(calls, mode) do
-    Enum.map(calls, fn call ->
-      output =
-        case Permission.check(call["name"], call["input"], mode) do
-          :allow -> Tools.execute(call["name"], call["input"])
-          {:deny, reason} -> "Denied: #{reason}"
-        end
+  @spec execute_tools(list(map()), Permission.mode(), non_neg_integer()) :: list(map())
+  defp execute_tools(calls, mode, iter) do
+    results =
+      Enum.map(calls, fn call ->
+        output =
+          case Permission.check(call["name"], call["input"], mode) do
+            :allow -> Tools.execute(call["name"], call["input"])
+            {:deny, reason} -> "Denied: #{reason}"
+          end
 
-      %{"type" => "tool_result", "tool_use_id" => call["id"], "content" => output}
-    end)
+        %{"type" => "tool_result", "tool_use_id" => call["id"], "content" => output}
+      end)
+
+    if iter >= 2 do
+      nudge = %{
+        "type" => "text",
+        "text" =>
+          "You have used tools across #{iter + 1} iterations. " <>
+            "If you have enough information, provide your final answer now and include 'DONE:'."
+      }
+
+      results ++ [nudge]
+    else
+      results
+    end
   end
 
   @spec llm_module() :: module()

@@ -15,7 +15,15 @@ defmodule MiniAgent do
 
   @max_iterations Application.compile_env!(:mini_agent, :max_iterations)
   @run_timeout_ms 120_000
-  @system_prompt "You are a coding agent. Use tools to explore and modify code. Say 'DONE:' when the task is complete."
+  @system_prompt """
+  You are a coding agent. Use the available tools to explore and modify code.
+
+  Rules:
+  - Use tools only when needed. Do not repeat a tool call with the same arguments.
+  - Once you have enough information, answer directly - do not call more tools.
+  - When the task is fully complete, you MUST include the word DONE: somewhere in your response, followed by your final answer.
+  - Example final response: "DONE: Here are the files in lib/: mini_agent.ex, ..."
+  """
 
   defmodule State do
     @moduledoc false
@@ -186,15 +194,37 @@ defmodule MiniAgent do
         %{"type" => "tool_result", "tool_use_id" => call["id"], "content" => output}
       end)
 
-    tool_msg = %{"role" => "user", "content" => results}
+    # From iteration 2 onwards, append a nudge text block in the same user turn.
+    # Valid for Anthropic (mixed content user turn) and DeepSeek (see convert_message).
+    content =
+      if state.iterations >= 2 do
+        nudge = %{
+          "type" => "text",
+          "text" =>
+            "You have now used tools across #{state.iterations + 1} iterations. " <>
+              "If you have gathered enough information to complete the task, provide your final answer now and include 'DONE:' in the response. " <>
+              "Only use more tools if you are genuinely missing required information."
+        }
+
+        results ++ [nudge]
+      else
+        results
+      end
+
+    tool_msg = %{"role" => "user", "content" => content}
     %{state | messages: state.messages ++ [tool_msg], tool_calls: []}
   end
 
   defp observe(%State{last: last} = state) when is_binary(last) do
-    if String.starts_with?(String.trim(last), "DONE:") do
+    if String.contains?(last, "DONE:") do
       %{state | done: true}
     else
-      continue_msg = %{"role" => "user", "content" => "Continue."}
+      continue_msg = %{
+        "role" => "user",
+        "content" =>
+          "You have not finished yet. Continue working. When the task is complete, include 'DONE:' in your response followed by your final answer."
+      }
+
       %{state | messages: state.messages ++ [continue_msg]}
     end
   end

@@ -167,17 +167,31 @@ defmodule MiniAgent.LLM.DeepSeek do
   end
 
   defp convert_message(%{"role" => "user", "content" => content}) when is_list(content) do
-    # Tool result blocks -> individual role:tool messages
     tool_results = Enum.filter(content, &(&1["type"] == "tool_result"))
 
     if tool_results != [] do
-      Enum.map(tool_results, fn block ->
-        %{
-          "role" => "tool",
-          "tool_call_id" => block["tool_use_id"],
-          "content" => block["content"] || ""
-        }
-      end)
+      # Convert each tool result to a role:tool message (OpenAI format)
+      tool_messages =
+        Enum.map(tool_results, fn block ->
+          %{
+            "role" => "tool",
+            "tool_call_id" => block["tool_use_id"],
+            "content" => block["content"] || ""
+          }
+        end)
+
+      # Also emit any accompanying text blocks (e.g. iteration nudge) as a user message
+      text_blocks = Enum.filter(content, &(&1["type"] == "text"))
+
+      text_messages =
+        if text_blocks != [] do
+          text = Enum.map_join(text_blocks, "\n", & &1["text"])
+          [%{"role" => "user", "content" => text}]
+        else
+          []
+        end
+
+      tool_messages ++ text_messages
     else
       # Plain user message with mixed content - extract text
       text =
