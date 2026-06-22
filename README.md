@@ -95,16 +95,18 @@ mix escript.build
 ### Default backend: DeepSeek
 
 ```bash
-export DEEPSEEK_API_KEY="sk-..."
+# Store your key in a .env file (gitignored)
+echo 'export DEEPSEEK_API_KEY="sk-..."' > .env
+source .env
 
 # Interactive permission prompt (default)
-./mini_agent "Read lib/mini_agent.ex and summarise the architecture, then DONE"
+./mini_agent "Read lib/mini_agent.ex and summarise the architecture"
 
 # Auto mode - approves all tool calls silently
-./mini_agent --auto "List files in lib/, read mini_agent.ex, then DONE"
+./mini_agent --auto "List files in lib/ and count how many there are"
 
 # Readonly mode - blocks write_file and shell
-./mini_agent --mode readonly "List all files under lib/ and count lines, then DONE"
+./mini_agent --mode readonly "List all files under lib/"
 
 # Orchestrator mode - decomposes task into parallel sub-agents
 ./mini_agent --parallel --mode readonly \
@@ -125,10 +127,10 @@ config :mini_agent,
 export ANTHROPIC_API_KEY="sk-ant-..."
 
 # Standard run
-./mini_agent "Read lib/mini_agent.ex and summarise the architecture, then DONE"
+./mini_agent "Read lib/mini_agent.ex and summarise the architecture"
 
 # Streaming - tokens appear on terminal as they arrive
-./mini_agent --stream "Explain how the agent loop works, then DONE"
+./mini_agent --stream "Explain how the agent loop works"
 
 # Orchestrator mode (sub-agents run non-streaming internally)
 ./mini_agent --parallel --mode readonly \
@@ -141,11 +143,11 @@ export ANTHROPIC_API_KEY="sk-ant-..."
 iex -S mix
 
 # Standard run
-{:ok, pid} = MiniAgent.start_link("Explain Budget module, then DONE", mode: :auto)
+{:ok, pid} = MiniAgent.start_link("Explain Budget module", mode: :auto)
 MiniAgent.run(pid)
 
 # Streaming run (tokens printed as they arrive)
-{:ok, pid} = MiniAgent.start_link("Explain GenServer loop, then DONE",
+{:ok, pid} = MiniAgent.start_link("Explain GenServer loop",
   mode: :auto, stream: true)
 MiniAgent.run(pid)
 
@@ -165,7 +167,7 @@ All values live in `config/config.exs` and are resolved at compile time via
 |-----|---------|-------------|
 | `:model` | `"deepseek-chat"` | LLM model name passed to the active backend |
 | `:max_iterations` | `8` | Hard cap on perceive-act-observe cycles per agent run |
-| `:max_tokens` | `2048` | Max tokens per LLM response |
+| `:max_tokens` | `2048` | Max tokens per LLM response. Increase to `4096`+ for large file reads |
 | `:token_budget` | `50_000` | Total token spend cap per agent run |
 | `:compress_token_threshold` | `8_000` | Tokens consumed before context compression fires |
 | `:workspace` | `File.cwd!()` | Sandbox root - all file/shell ops are restricted to this path |
@@ -298,12 +300,37 @@ Sub-agent constraints:
 
 | Parameter | Value |
 |-----------|-------|
-| Max iterations per sub-agent | 5 |
-| Token budget per sub-agent | 15 000 |
+| Max iterations per sub-agent | 8 |
+| Token budget per sub-agent | 25 000 |
 | Mode | Always `:readonly` |
 | Recursive delegation | Blocked (`delegate` excluded from `safe_definitions/0`) |
 | Timeout per sub-agent | 120 s |
 | Failure handling | `yield_many` - one crash/timeout does not abort other sub-agents |
+
+---
+
+## Loop Termination
+
+The agent loop (`perceive -> act -> observe -> tick`) terminates when any of the
+following conditions is met:
+
+| Condition | Message |
+|-----------|---------|
+| LLM response contains `DONE:` | Output is the full response text |
+| `max_iterations` reached | `"Max iterations (N) reached"` |
+| Token budget exhausted | `"Budget exceeded. Token: X/Y (Z%)"` |
+| LLM returns an error | `"LLM error: ..."` |
+
+**`DONE:` detection** uses `String.contains?/2` - the word `DONE:` can appear
+anywhere in the LLM response, not just at the start. This accommodates natural
+phrasing like `"Here is the summary: [...] DONE: task complete."`.
+
+**Iteration nudge** - from iteration 2 onwards, a reminder is appended alongside
+each tool result message:
+> *"You have used tools across N iterations. If you have enough information,
+> provide your final answer now and include 'DONE:' in the response."*
+
+This prevents the LLM from over-exploring when it already has the data it needs.
 
 ---
 
