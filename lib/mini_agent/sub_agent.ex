@@ -12,8 +12,8 @@ defmodule MiniAgent.SubAgent do
 
   alias MiniAgent.{Budget, Permission, Tools}
 
-  @max_iter 5
-  @sub_budget 15_000
+  @max_iter 8
+  @sub_budget 25_000
   @system_prompt """
   You are a focused sub-agent completing exactly one specific task.
   Use tools as needed, but do not repeat the same tool call with the same arguments.
