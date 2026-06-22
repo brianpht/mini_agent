@@ -11,7 +11,7 @@ defmodule MiniAgent do
 
   use GenServer
 
-  alias MiniAgent.{Budget, Memory, Permission, Tools}
+  alias MiniAgent.{Budget, Checkpoint, Memory, Permission, Tools}
 
   @max_iterations Application.compile_env!(:mini_agent, :max_iterations)
   @run_timeout_ms 120_000
@@ -29,6 +29,7 @@ defmodule MiniAgent do
     @moduledoc false
 
     @type t :: %__MODULE__{
+            session_id: String.t() | nil,
             task: String.t() | nil,
             messages: list(map()),
             iterations: non_neg_integer(),
@@ -38,10 +39,12 @@ defmodule MiniAgent do
             last: String.t() | nil,
             budget: Budget.t() | nil,
             mode: MiniAgent.Permission.mode(),
-            stream_callback: (String.t() -> :ok) | nil
+            stream_callback: (String.t() -> :ok) | nil,
+            autosave: boolean()
           }
 
     defstruct [
+      :session_id,
       :task,
       :output,
       :last,
@@ -51,14 +54,43 @@ defmodule MiniAgent do
       iterations: 0,
       done: false,
       tool_calls: [],
-      mode: :ask
+      mode: :ask,
+      autosave: false
     ]
   end
 
   @doc "Start the agent GenServer linked to the calling process."
   @spec start_link(String.t(), keyword()) :: GenServer.on_start()
   def start_link(task, opts \\ []) do
-    GenServer.start_link(__MODULE__, {task, opts})
+    GenServer.start_link(__MODULE__, {:new, task, opts})
+  end
+
+  @doc """
+  Resume an agent from a previously saved checkpoint.
+
+  Returns {:ok, pid} on success, or {:error, reason} if the session cannot
+  be loaded. The resumed agent continues from the iteration after the last
+  saved one, spending no extra tokens re-doing completed work.
+  """
+  @spec resume(Checkpoint.session_id(), keyword()) ::
+          {:ok, pid()} | {:error, String.t()}
+  def resume(session_id, opts \\ []) do
+    case Checkpoint.load(session_id) do
+      {:ok, base_state} ->
+        autosave = Keyword.get(opts, :autosave, true)
+        stream_callback = if Keyword.get(opts, :stream, false), do: &IO.write/1, else: nil
+
+        state = %{
+          base_state
+          | autosave: autosave,
+            stream_callback: stream_callback
+        }
+
+        GenServer.start_link(__MODULE__, {:resume, state})
+
+      {:error, reason} ->
+        {:error, reason}
+    end
   end
 
   @doc "Run the agent loop and block until done. Returns the final output string."
@@ -68,7 +100,9 @@ defmodule MiniAgent do
   end
 
   @impl GenServer
-  def init({task, opts}) do
+  def init({:new, task, opts}) do
+    Process.flag(:trap_exit, true)
+
     stream_callback =
       if Keyword.get(opts, :stream, false) do
         &IO.write/1
@@ -77,12 +111,19 @@ defmodule MiniAgent do
       end
 
     state = %State{
+      session_id: Checkpoint.new_session_id(),
       task: task,
       budget: Budget.new(),
       mode: Keyword.get(opts, :mode, :ask),
+      autosave: Keyword.get(opts, :autosave, false),
       stream_callback: stream_callback
     }
 
+    {:ok, state}
+  end
+
+  def init({:resume, %State{} = state}) do
+    Process.flag(:trap_exit, true)
     {:ok, state}
   end
 
@@ -91,6 +132,14 @@ defmodule MiniAgent do
     final = loop(state)
     {:reply, final.output || "(no output)", final}
   end
+
+  @impl GenServer
+  def terminate(_reason, %State{autosave: true} = state) do
+    Checkpoint.save(state)
+    :ok
+  end
+
+  def terminate(_reason, _state), do: :ok
 
   # --- loop ---
 
@@ -122,6 +171,7 @@ defmodule MiniAgent do
       |> act()
       |> observe()
       |> tick()
+      |> maybe_checkpoint()
       |> loop()
     end
   end
@@ -238,4 +288,20 @@ defmodule MiniAgent do
 
   @spec llm_module() :: module()
   defp llm_module, do: Application.fetch_env!(:mini_agent, :llm_module)
+
+  # Save a checkpoint after each completed iteration when autosave is enabled.
+  @spec maybe_checkpoint(State.t()) :: State.t()
+  defp maybe_checkpoint(%State{autosave: true} = state) do
+    sid = Checkpoint.save(state)
+
+    :telemetry.execute(
+      [:mini_agent, :checkpoint, :saved],
+      %{iterations: state.iterations},
+      %{session_id: sid}
+    )
+
+    %{state | session_id: sid}
+  end
+
+  defp maybe_checkpoint(state), do: state
 end

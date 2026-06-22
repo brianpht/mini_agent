@@ -5,10 +5,12 @@ A soft real-time, allocation-conscious Elixir/OTP coding agent that drives a
 
 The agent can read, write, and list files; run whitelisted shell commands; compress
 its own context when token usage climbs; stream tokens in real-time as they arrive;
-and decompose complex tasks into parallel sub-agents for fan-out execution. A
-configurable permission gate guards dangerous operations. All non-determinism is
-injected (LLM module, clock, workspace) so the core logic is fully testable offline
-with Mox - no API key required for the test suite.
+decompose complex tasks into parallel sub-agents for fan-out execution; and
+**save its full state to disk after every iteration so it can resume exactly where it
+left off** after a crash, network drop, or manual interruption. A configurable
+permission gate guards dangerous operations. All non-determinism is injected (LLM
+module, clock, workspace) so the core logic is fully testable offline with Mox - no
+API key required for the test suite.
 
 Two LLM backends are included out of the box:
 
@@ -25,6 +27,7 @@ Two LLM backends are included out of the box:
 flowchart TD
     CLI["MiniAgent.CLI\nescript entry"] -->|default| GS["MiniAgent\nGenServer"]
     CLI -->|--parallel| ORC["MiniAgent.Orchestrator\nplan + fan-out + synthesize"]
+    CLI -->|--resume| CKP["MiniAgent.Checkpoint\nsave / load / list / delete"]
     GS -->|perceive| MEM["MiniAgent.Memory\ncontext compression"]
     GS -->|act| BEH["MiniAgent.LLM.Behaviour\ninterface"]
     BEH --> ANT["MiniAgent.LLM.Anthropic\nClaude API"]
@@ -38,6 +41,8 @@ flowchart TD
     TOOLS -->|delegate tool| ORC
     ORC -->|async_nolink x N| SUB["MiniAgent.SubAgent\npure-function loop"]
     SUB --> BEH
+    GS -->|after each tick| CKP
+    GS -->|terminate| CKP
     GS --> BUD["MiniAgent.Budget\ntoken quota"]
     GS --> TEL["MiniAgent.Telemetry\nevent handlers"]
     MEM -.->|async Task| BEH
@@ -56,6 +61,7 @@ lib/
       deepseek.ex                # DeepSeek API client (OpenAI-compat adapter)
       deepseek_stream_parser.ex  # Pure SSE parser - OpenAI event format
     budget.ex                    # Token quota - pure struct
+    checkpoint.ex                # Checkpoint save/load/list/delete - JSON on disk
     memory.ex                    # Context compression (token-based threshold)
     permission.ex                # :auto | :ask | :readonly gate
     tools.ex                     # Tool registry and dispatcher (incl. delegate)
@@ -156,6 +162,15 @@ iex -S mix
 {:ok, pid} = MiniAgent.start_link("Explain Budget module", mode: :auto)
 MiniAgent.run(pid)
 
+# Autosave enabled - checkpoint written after every iteration
+{:ok, pid} = MiniAgent.start_link("Explain Budget module", mode: :auto, autosave: true)
+sid = :sys.get_state(pid).session_id
+MiniAgent.run(pid)
+
+# Resume a previous session
+{:ok, pid} = MiniAgent.resume(sid, autosave: true)
+MiniAgent.run(pid)
+
 # Streaming run (tokens printed as they arrive)
 {:ok, pid} = MiniAgent.start_link("Explain GenServer loop",
   mode: :auto, stream: true)
@@ -164,6 +179,11 @@ MiniAgent.run(pid)
 # Orchestrator directly
 MiniAgent.Orchestrator.run("Analyse architecture, tools, and budget",
   mode: :readonly)
+
+# Checkpoint helpers
+MiniAgent.Checkpoint.list()
+MiniAgent.Checkpoint.load("1750000000-a3f9c1")
+MiniAgent.Checkpoint.delete("1750000000-a3f9c1")
 ```
 
 ---
@@ -182,6 +202,7 @@ All values live in `config/config.exs` and are resolved at compile time via
 | `:compress_token_threshold` | `8_000` | Tokens consumed before context compression fires |
 | `:workspace` | `File.cwd!()` | Sandbox root - all file/shell ops are restricted to this path |
 | `:llm_module` | `MiniAgent.LLM.DeepSeek` | LLM implementation module |
+| `:checkpoint_dir` | `".mini_agent/checkpoints"` | Directory for checkpoint JSON files (relative to cwd) |
 
 Available `:llm_module` values:
 
@@ -205,8 +226,92 @@ Available `:llm_module` values:
 | `--mode readonly` | `-m readonly` | Block `write_file` and `shell` (`:readonly` mode) |
 | `--stream` | `-s` | Enable real-time token streaming (both backends) |
 | `--parallel` | `-p` | Orchestrator mode: decompose task into parallel sub-agents |
+| `--list` | `-l` | List all saved checkpoints with status and token counts |
+| `--resume <id>` | `-r <id>` | Resume an in-progress session from its last checkpoint |
+| `--delete <id>` | | Delete a checkpoint file |
 
 Flags can be combined: `--stream --parallel --mode readonly`.
+
+---
+
+## Checkpoint and Resume
+
+Every agent run is assigned a **session ID** (`unix_ts-hex6`, e.g. `1750000000-a3f9c1`).
+With `autosave: true` (default for CLI), the agent writes a snapshot to
+`.mini_agent/checkpoints/<session_id>.json` after **every completed iteration**.
+An append-only `.history` file records the timestamp of each save for audit.
+
+If the process crashes, the network drops, or the user presses Ctrl-C, the `terminate/2`
+callback flushes a final checkpoint before the process exits.
+
+On resume, the agent reconstructs the full `%MiniAgent.State{}` from JSON and continues
+from iteration N+1 - no tokens are re-spent for work already completed.
+
+### Checkpoint commands
+
+```bash
+# See all saved sessions, newest first
+./mini_agent --list
+
+# Continue an in-progress session
+./mini_agent --resume 1750000000-a3f9c1
+
+# Resume with streaming output
+./mini_agent --stream --resume 1750000000-a3f9c1
+
+# Remove a checkpoint
+./mini_agent --delete 1750000000-a3f9c1
+```
+
+Sample `--list` output:
+
+```
+Saved sessions:
+
+  1750000000-a3f9c1
+    in progress - iteration 3 - 8420 tokens - 2026-06-22T10:15:33.421Z
+    task: Read lib/mini_agent.ex and summarise the architectur...
+
+  1749990000-b1c2d3
+    done - iteration 6 - 21340 tokens - 2026-06-22T09:02:11.004Z
+    task: List all tools and explain each one...
+```
+
+### Checkpoint JSON format
+
+The checkpoint file is plain JSON, human-readable and diff-friendly:
+
+```json
+{
+  "version": 1,
+  "session_id": "1750000000-a3f9c1",
+  "saved_at": "2026-06-22T10:15:33.421Z",
+  "task": "Read lib/mini_agent.ex and summarise the architecture",
+  "mode": "readonly",
+  "iterations": 3,
+  "done": false,
+  "output": "The architecture is...",
+  "budget": { "used": 8420, "limit": 50000 },
+  "messages": [
+    { "role": "user", "content": "Read lib/mini_agent.ex..." },
+    { "role": "assistant", "content": [ { "type": "text", "text": "..." } ] }
+  ]
+}
+```
+
+### What is and is not persisted
+
+| Field | Persisted | Notes |
+|-------|-----------|-------|
+| `task`, `mode`, `iterations`, `done`, `output` | Yes | Core loop state |
+| `budget.used` / `budget.limit` | Yes | Token accounting |
+| `messages` | Yes | Full conversation history, string-key normalised |
+| `session_id` | Yes | Stable across resume cycles |
+| `stream_callback` | No | Runtime function - reset to `nil` on resume |
+| `tool_calls`, `last` | No | Per-iteration scratch - reset to `[]` / `nil` on resume |
+
+Transient fields are always safe to drop because they are repopulated within the same
+iteration in which they were set.
 
 ---
 
@@ -402,6 +507,7 @@ via `config/test.exs`.
 mix test                                                        # all tests
 mix test test/mini_agent_test.exs                               # integration tests only
 mix test test/mini_agent/budget_test.exs                        # unit tests for a single module
+mix test test/mini_agent/checkpoint_test.exs                    # checkpoint save/load/list/delete
 mix test test/mini_agent/llm/anthropic_stream_parser_test.exs   # Anthropic SSE parser unit tests
 mix test test/mini_agent/llm/deepseek_stream_parser_test.exs    # DeepSeek SSE parser unit tests
 mix test test/mini_agent/sub_agent_test.exs                     # SubAgent unit tests
@@ -414,6 +520,7 @@ Test categories:
 |------|------|-------|
 | `mini_agent_test.exs` | Integration | Full agent loop, MockLLM, tool dispatch |
 | `budget_test.exs` | Unit | Pure struct functions |
+| `checkpoint_test.exs` | Unit | save/load round-trip, version guard, list, delete |
 | `memory_test.exs` | Unit | Threshold logic + compression path |
 | `permission_test.exs` | Unit | `:auto` and `:readonly` modes |
 | `tools_test.exs` | Unit | Dispatcher, file read/write in tmp/ |
@@ -438,5 +545,5 @@ Test categories:
 | 6 | DeepSeek backend (OpenAI-compat adapter) | Done |
 | 7 | Real-time streaming - Anthropic SSE + DeepSeek SSE | Done |
 | 8 | Sub-agents + Orchestrator (parallel fan-out) | Done |
-| 9 | Checkpoint and resume (save/restore agent state) | Planned |
+| 9 | Checkpoint and resume (save/restore agent state) | Done |
 | 10 | MCP integration (Model Context Protocol tools) | Planned |
