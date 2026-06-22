@@ -5,6 +5,16 @@ defmodule MiniAgent.LLMBehaviour do
   @callback chat(messages :: list(map()), opts :: keyword()) ::
               {:ok, map()} | {:error, String.t()}
 
+  @doc """
+  Streaming chat. Calls on_chunk for each text delta as it arrives.
+  Returns {:ok, response_map} in the same format as chat/2 when complete.
+  """
+  @callback chat_stream(
+              messages :: list(map()),
+              on_chunk :: (String.t() -> :ok),
+              opts :: keyword()
+            ) :: {:ok, map()} | {:error, String.t()}
+
   @doc "Extract concatenated text from a response map."
   @callback extract_text(response :: map()) :: String.t()
 

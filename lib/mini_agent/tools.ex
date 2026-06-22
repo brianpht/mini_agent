@@ -43,8 +43,22 @@ defmodule MiniAgent.Tools do
           command: %{type: "string", description: "full command string"}
         },
         ["command"]
+      ),
+      tool(
+        "delegate",
+        "Decompose a complex task into parallel sub-agents and synthesize results. Use when the task has independent sub-problems that can be explored concurrently.",
+        %{
+          task: %{type: "string", description: "the complex task to decompose and delegate"}
+        },
+        ["task"]
       )
     ]
+  end
+
+  @doc "Tool schema list for sub-agents. Excludes delegate to prevent recursive fan-out."
+  @spec safe_definitions() :: list(map())
+  def safe_definitions do
+    Enum.reject(definitions(), &(&1.name == "delegate"))
   end
 
   @doc "Dispatch tool execution by name. Uses static pattern matching - no apply/3."
@@ -73,6 +87,11 @@ defmodule MiniAgent.Tools do
     result
   end
 
+  def execute("delegate", %{"task" => task}) do
+    emit(:telemetry, "delegate")
+    MiniAgent.Orchestrator.run(task, mode: :readonly)
+  end
+
   def execute(name, _input) do
     emit(:telemetry, name)
     "Error: unknown tool '#{name}'"
@@ -82,6 +101,7 @@ defmodule MiniAgent.Tools do
   @spec dangerous?(tool_name()) :: boolean()
   def dangerous?("write_file"), do: true
   def dangerous?("shell"), do: true
+  def dangerous?("delegate"), do: false
   def dangerous?(_), do: false
 
   @spec tool(String.t(), String.t(), map(), list(String.t())) :: map()

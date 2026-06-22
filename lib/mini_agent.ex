@@ -29,7 +29,8 @@ defmodule MiniAgent do
             tool_calls: list(map()),
             last: String.t() | nil,
             budget: Budget.t() | nil,
-            mode: MiniAgent.Permission.mode()
+            mode: MiniAgent.Permission.mode(),
+            stream_callback: (String.t() -> :ok) | nil
           }
 
     defstruct [
@@ -37,6 +38,7 @@ defmodule MiniAgent do
       :output,
       :last,
       :budget,
+      :stream_callback,
       messages: [],
       iterations: 0,
       done: false,
@@ -59,10 +61,18 @@ defmodule MiniAgent do
 
   @impl GenServer
   def init({task, opts}) do
+    stream_callback =
+      if Keyword.get(opts, :stream, false) do
+        &IO.write/1
+      else
+        nil
+      end
+
     state = %State{
       task: task,
       budget: Budget.new(),
-      mode: Keyword.get(opts, :mode, :ask)
+      mode: Keyword.get(opts, :mode, :ask),
+      stream_callback: stream_callback
     }
 
     {:ok, state}
@@ -127,8 +137,15 @@ defmodule MiniAgent do
 
   defp act(%State{} = state) do
     mod = llm_module()
+    llm_opts = [system: @system_prompt, tools: Tools.definitions()]
 
-    case mod.chat(state.messages, system: @system_prompt, tools: Tools.definitions()) do
+    result =
+      case state.stream_callback do
+        nil -> mod.chat(state.messages, llm_opts)
+        cb -> mod.chat_stream(state.messages, cb, llm_opts)
+      end
+
+    case result do
       {:ok, resp} ->
         tokens = mod.usage(resp)
         calls = mod.extract_tool_calls(resp)

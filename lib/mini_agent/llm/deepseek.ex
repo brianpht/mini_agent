@@ -6,6 +6,11 @@ defmodule MiniAgent.LLM.DeepSeek do
   and the OpenAI Chat Completions format expected by DeepSeek. All format conversions
   are confined to this module - the agent loop requires no changes.
 
+  Streaming: chat_stream/3 is a non-streaming fallback. It calls chat/2 and emits
+  the full response text in one on_chunk call. Token-by-token streaming UX requires
+  implementing SSE parsing for the OpenAI streaming format (stream: true). Use
+  MiniAgent.LLM.Anthropic for real-time token streaming.
+
   Required env var: DEEPSEEK_API_KEY
   """
 
@@ -29,6 +34,24 @@ defmodule MiniAgent.LLM.DeepSeek do
       {:ok, %{status: 200, body: resp}} -> {:ok, normalize_response(resp)}
       {:ok, %{status: s, body: e}} -> {:error, "HTTP #{s}: #{inspect(e)}"}
       {:error, reason} -> {:error, "Network: #{inspect(reason)}"}
+    end
+  end
+
+  @impl MiniAgent.LLMBehaviour
+  @spec chat_stream(list(map()), (String.t() -> :ok), keyword()) ::
+          {:ok, map()} | {:error, String.t()}
+  def chat_stream(messages, on_chunk, opts \\ []) when is_function(on_chunk, 1) do
+    # DeepSeek uses OpenAI-compatible SSE format. Delegate to non-streaming
+    # chat/2 and call on_chunk once with the full text to satisfy the contract.
+    # A full SSE implementation can be added when DeepSeek streaming is needed.
+    case chat(messages, opts) do
+      {:ok, resp} ->
+        text = extract_text(resp)
+        if text != "", do: on_chunk.(text)
+        {:ok, resp}
+
+      {:error, _} = err ->
+        err
     end
   end
 
