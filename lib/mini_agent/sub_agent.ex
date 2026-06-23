@@ -10,7 +10,7 @@ defmodule MiniAgent.SubAgent do
   Designed to be called from MiniAgent.Orchestrator via Task.Supervisor.
   """
 
-  alias MiniAgent.{Budget, Permission, Tools}
+  alias MiniAgent.{Budget, LLM.Retry, Permission, Tools}
 
   @max_iter 8
   @sub_budget 25_000
@@ -86,7 +86,9 @@ defmodule MiniAgent.SubAgent do
   defp step(s) do
     mod = llm_module()
 
-    case mod.chat(s.messages, system: @system_prompt, tools: Tools.safe_definitions()) do
+    case Retry.with_retry(fn ->
+           mod.chat(s.messages, system: @system_prompt, tools: Tools.safe_definitions())
+         end) do
       {:ok, resp} ->
         calls = mod.extract_tool_calls(resp)
         text = mod.extract_text(resp)
@@ -124,7 +126,7 @@ defmodule MiniAgent.SubAgent do
       Enum.map(calls, fn call ->
         output =
           case Permission.check(call["name"], call["input"], mode) do
-            :allow -> Tools.execute(call["name"], call["input"])
+            :allow -> Tools.execute(call["name"], call["input"], mode)
             {:deny, reason} -> "Denied: #{reason}"
           end
 

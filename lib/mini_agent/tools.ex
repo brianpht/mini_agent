@@ -13,9 +13,10 @@ defmodule MiniAgent.Tools do
     [
       tool(
         "read_file",
-        "Read file contents",
+        "Read file contents (up to 4000 bytes per call). Use the optional offset parameter to page through large files.",
         %{
-          path: %{type: "string", description: "file path"}
+          path: %{type: "string", description: "file path"},
+          offset: %{type: "integer", description: "byte offset to start reading from (default 0)"}
         },
         ["path"]
       ),
@@ -61,38 +62,43 @@ defmodule MiniAgent.Tools do
     Enum.reject(definitions(), &(&1.name == "delegate"))
   end
 
-  @doc "Dispatch tool execution by name. Uses static pattern matching - no apply/3."
-  @spec execute(tool_name(), tool_input()) :: tool_result()
-  def execute("read_file", input) do
+  @doc """
+  Dispatch tool execution by name. Uses static pattern matching - no apply/3.
+
+  The `mode` parameter is passed through to delegate so that sub-agents inherit
+  the calling agent's permission level rather than defaulting to :readonly.
+  """
+  @spec execute(tool_name(), tool_input(), MiniAgent.Permission.mode()) :: tool_result()
+  def execute("read_file", input, _mode) do
     result = FileTool.read_file(input)
     emit(:telemetry, "read_file")
     result
   end
 
-  def execute("list_dir", input) do
+  def execute("list_dir", input, _mode) do
     result = FileTool.list_dir(input)
     emit(:telemetry, "list_dir")
     result
   end
 
-  def execute("write_file", input) do
+  def execute("write_file", input, _mode) do
     result = FileTool.write_file(input)
     emit(:telemetry, "write_file")
     result
   end
 
-  def execute("shell", input) do
+  def execute("shell", input, _mode) do
     result = ShellTool.run(input)
     emit(:telemetry, "shell")
     result
   end
 
-  def execute("delegate", %{"task" => task}) do
+  def execute("delegate", %{"task" => task}, mode) do
     emit(:telemetry, "delegate")
-    MiniAgent.Orchestrator.run(task, mode: :readonly)
+    MiniAgent.Orchestrator.run(task, mode: mode)
   end
 
-  def execute(name, _input) do
+  def execute(name, _input, _mode) do
     emit(:telemetry, name)
     "Error: unknown tool '#{name}'"
   end

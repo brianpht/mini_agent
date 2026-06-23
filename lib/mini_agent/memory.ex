@@ -1,18 +1,27 @@
 defmodule MiniAgent.Memory do
+  @keep_recent 4
+  @summarize_timeout_ms 30_000
+  @threshold Application.compile_env!(:mini_agent, :compress_token_threshold)
+
   @moduledoc """
   Context compression for the agent message history.
 
   Compression is triggered when token budget consumed exceeds
   :compress_token_threshold (configured in config.exs). The oldest
-  messages are summarized via an async Task so the calling GenServer
-  is never blocked.
+  messages are summarized via a Task to isolate crashes - the caller
+  yields for up to #{@summarize_timeout_ms}ms waiting for the result.
+  The call IS blocking; the benefit is crash isolation, not concurrency.
+
+  ## Boundary safety
+
+  The split point is adjusted backwards if it would orphan a
+  tool_result message from its paired tool_use. This prevents sending
+  a conversation history that violates the Anthropic API contract.
+  If no safe split is possible (all old messages are tool turns), the
+  compression round is skipped and messages are returned unchanged.
   """
 
-  alias MiniAgent.Budget
-
-  @keep_recent 4
-  @summarize_timeout_ms 30_000
-  @threshold Application.compile_env!(:mini_agent, :compress_token_threshold)
+  alias MiniAgent.{Budget, LLM.Retry}
 
   @type messages :: list(map())
 
@@ -33,21 +42,50 @@ defmodule MiniAgent.Memory do
 
   @spec compress(messages()) :: messages()
   defp compress(messages) do
-    split_at = length(messages) - @keep_recent
-    {old, recent} = Enum.split(messages, split_at)
+    initial_split = length(messages) - @keep_recent
+    split_at = safe_split_at(messages, initial_split)
 
-    summary = summarize_async(old)
-    before_count = length(messages)
-    after_count = length(recent) + 1
+    if split_at < 2 do
+      # Not enough old messages for a safe split this round; skip compression.
+      messages
+    else
+      {old, recent} = Enum.split(messages, split_at)
 
-    :telemetry.execute(
-      [:mini_agent, :memory, :compressed],
-      %{before: before_count, after: after_count},
-      %{}
-    )
+      summary = summarize_async(old)
+      before_count = length(messages)
+      after_count = length(recent) + 1
 
-    [%{"role" => "user", "content" => "[CONTEXT SUMMARY]\n#{summary}"} | recent]
+      :telemetry.execute(
+        [:mini_agent, :memory, :compressed],
+        %{before: before_count, after: after_count},
+        %{}
+      )
+
+      [%{"role" => "user", "content" => "[CONTEXT SUMMARY]\n#{summary}"} | recent]
+    end
   end
+
+  # Walk the split index backwards until the first message of `recent` is NOT
+  # an orphaned tool_result block. This preserves tool_use / tool_result pairs.
+  @spec safe_split_at(messages(), non_neg_integer()) :: non_neg_integer()
+  defp safe_split_at(_messages, split_at) when split_at <= 1, do: split_at
+
+  defp safe_split_at(messages, split_at) do
+    msg = Enum.at(messages, split_at)
+
+    if orphaned_tool_result?(msg) do
+      safe_split_at(messages, split_at - 1)
+    else
+      split_at
+    end
+  end
+
+  # A user message whose content list starts with a tool_result block is an
+  # orphan if it appears at the beginning of `recent` without its preceding
+  # assistant tool_use message.
+  @spec orphaned_tool_result?(map() | nil) :: boolean()
+  defp orphaned_tool_result?(%{"content" => [%{"type" => "tool_result"} | _]}), do: true
+  defp orphaned_tool_result?(_), do: false
 
   @spec summarize_async(messages()) :: String.t()
   defp summarize_async(messages) do
@@ -81,7 +119,12 @@ defmodule MiniAgent.Memory do
       }
     ]
 
-    case llm_module().chat(prompt, system: "You are a context compressor. Be concise.") do
+    result =
+      Retry.with_retry(fn ->
+        llm_module().chat(prompt, system: "You are a context compressor. Be concise.")
+      end)
+
+    case result do
       {:ok, resp} -> llm_module().extract_text(resp)
       {:error, _} -> "(compression failed, context partially dropped)"
     end

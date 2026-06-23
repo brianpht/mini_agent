@@ -34,6 +34,7 @@ flowchart TD
     BEH --> DS["MiniAgent.LLM.DeepSeek\nOpenAI-compat API"]
     ANT -.->|streaming| ASP["MiniAgent.LLM.AnthropicStreamParser\nAnthropic SSE parser"]
     DS -.->|streaming| DSP["MiniAgent.LLM.DeepSeekStreamParser\nOpenAI SSE parser"]
+    BEH -.->|transient errors| RET["MiniAgent.LLM.Retry\nexponential backoff"]
     GS -->|observe| PERM["MiniAgent.Permission\npermission gate"]
     PERM --> TOOLS["MiniAgent.Tools\ndispatcher"]
     TOOLS --> FT["FileTool\nread/write/list"]
@@ -45,7 +46,7 @@ flowchart TD
     GS -->|terminate| CKP
     GS --> BUD["MiniAgent.Budget\ntoken quota"]
     GS --> TEL["MiniAgent.Telemetry\nevent handlers"]
-    MEM -.->|async Task| BEH
+    MEM -.->|crash-isolated Task| BEH
     PERM -.->|async Task| IO["stdin\napproval"]
 ```
 
@@ -56,6 +57,7 @@ lib/
     application.ex               # OTP Application + Task.Supervisor
     llm/
       behaviour.ex               # @callback contracts (enables Mox injection)
+      retry.ex                   # Exponential-backoff retry wrapper for LLM calls
       anthropic.ex               # Anthropic Claude API client + SSE streaming
       anthropic_stream_parser.ex # Pure SSE parser - Anthropic event format
       deepseek.ex                # DeepSeek API client (OpenAI-compat adapter)
@@ -66,7 +68,7 @@ lib/
     permission.ex                # :auto | :ask | :readonly gate
     tools.ex                     # Tool registry and dispatcher (incl. delegate)
     tools/
-      file_tool.ex               # read_file, write_file, list_dir
+      file_tool.ex               # read_file (with offset), write_file, list_dir
       shell_tool.ex              # Whitelisted shell commands
     sub_agent.ex                 # Lightweight pure-function agent loop
     orchestrator.ex              # plan -> parallel fan-out -> synthesize
@@ -127,6 +129,10 @@ source .env
 # Combine: streaming + orchestrator
 ./mini_agent --stream --parallel --mode readonly \
   "Describe the LLM layer and list all tools"
+
+# Target a different project without recompiling
+./mini_agent --workspace /path/to/other/project --mode readonly \
+  "Summarise the architecture"
 ```
 
 ### Anthropic backend
@@ -190,8 +196,10 @@ MiniAgent.Checkpoint.delete("1750000000-a3f9c1")
 
 ## Configuration
 
-All values live in `config/config.exs` and are resolved at compile time via
-`Application.compile_env!/2`.
+All values live in `config/config.exs`. Hot-path constants are resolved at compile
+time via `Application.compile_env!/2`. The `:workspace` key is the exception - it is
+read at **runtime** via `Application.get_env/3` so the `--workspace` CLI flag can
+override it without recompiling.
 
 | Key | Default | Description |
 |-----|---------|-------------|
@@ -200,7 +208,7 @@ All values live in `config/config.exs` and are resolved at compile time via
 | `:max_tokens` | `2048` | Max tokens per LLM response. Increase to `4096`+ for large file reads |
 | `:token_budget` | `50_000` | Total token spend cap per agent run |
 | `:compress_token_threshold` | `8_000` | Tokens consumed before context compression fires |
-| `:workspace` | `File.cwd!()` | Sandbox root - all file/shell ops are restricted to this path |
+| `:workspace` | `File.cwd!()` | Sandbox root - all file/shell ops restricted to this path. Overridable at runtime via `--workspace` flag |
 | `:llm_module` | `MiniAgent.LLM.DeepSeek` | LLM implementation module |
 | `:checkpoint_dir` | `".mini_agent/checkpoints"` | Directory for checkpoint JSON files (relative to cwd) |
 
@@ -226,6 +234,7 @@ Available `:llm_module` values:
 | `--mode readonly` | `-m readonly` | Block `write_file` and `shell` (`:readonly` mode) |
 | `--stream` | `-s` | Enable real-time token streaming (both backends) |
 | `--parallel` | `-p` | Orchestrator mode: decompose task into parallel sub-agents |
+| `--workspace <path>` | `-w <path>` | Override sandbox workspace root at runtime (no recompile needed) |
 | `--list` | `-l` | List all saved checkpoints with status and token counts |
 | `--resume <id>` | `-r <id>` | Resume an in-progress session from its last checkpoint |
 | `--delete <id>` | | Delete a checkpoint file |
@@ -237,7 +246,8 @@ Flags can be combined: `--stream --parallel --mode readonly`.
 ## Checkpoint and Resume
 
 Every agent run is assigned a **session ID** (`unix_ts-hex6`, e.g. `1750000000-a3f9c1`).
-With `autosave: true` (default for CLI), the agent writes a snapshot to
+The timestamp uses `:erlang.system_time(:second)` (not wall clock) for monotonic
+stability. With `autosave: true` (default for CLI), the agent writes a snapshot to
 `.mini_agent/checkpoints/<session_id>.json` after **every completed iteration**.
 An append-only `.history` file records the timestamp of each save for audit.
 
@@ -326,8 +336,9 @@ iteration in which they were set.
 The `:ask` approval prompt runs inside a supervised `Task` so the agent GenServer
 mailbox is never blocked while waiting for user input.
 
-Sub-agents spawned by the orchestrator always run in `:readonly` mode regardless of
-the parent mode, to prevent concurrent writes from racing.
+Sub-agents spawned by the `delegate` tool or `--parallel` flag **inherit the calling
+agent's permission mode**. There is no implicit downgrade to `:readonly` - the mode
+passed at the CLI or via `Orchestrator.run/2` propagates through the full call chain.
 
 ---
 
@@ -335,7 +346,7 @@ the parent mode, to prevent concurrent writes from racing.
 
 | Tool | Dangerous? | Description |
 |------|-----------|-------------|
-| `read_file` | No | Read file contents within workspace |
+| `read_file` | No | Read file contents within workspace (4 000 bytes per call, pageable via `offset`) |
 | `list_dir` | No | List directory contents |
 | `write_file` | Yes | Write content to a file (blocked in `:readonly`) |
 | `shell` | Yes | Run a whitelisted shell command (blocked in `:readonly`) |
@@ -344,6 +355,24 @@ the parent mode, to prevent concurrent writes from racing.
 The `delegate` tool is excluded from sub-agent tool lists (`Tools.safe_definitions/0`)
 to prevent recursive fan-out.
 
+### read_file pagination
+
+Large files are read in 4 000-byte pages. When a file exceeds the limit, the output
+ends with a truncation hint:
+
+```
+[truncated - 12500 bytes remaining, use offset: 4000]
+```
+
+Pass `offset` to read the next page:
+
+```json
+{ "name": "read_file", "input": { "path": "lib/big_file.ex", "offset": 4000 } }
+```
+
+The LLM is instructed to page through files automatically when it encounters the
+truncation hint.
+
 ### Shell Tool Whitelist
 
 ```
@@ -351,6 +380,25 @@ cat  echo  find  git  grep  head  ls  mix  tail  wc
 ```
 
 All commands are sandboxed to `:workspace`. Output is capped at 4 000 bytes.
+
+---
+
+## LLM Retry
+
+Transient LLM API failures (rate limits, temporary service unavailability, network
+issues) are automatically retried with **exponential backoff** before the error is
+surfaced to the agent loop.
+
+| Parameter | Value |
+|-----------|-------|
+| Max retries | 3 |
+| Backoff schedule | 1 s, 2 s, 4 s (7 s total) |
+| Retryable errors | HTTP 429, HTTP 503, `timeout`, `econnrefused`, `connection refused` |
+| Non-retryable | HTTP 4xx (except 429), HTTP 5xx (except 503), domain errors |
+
+Retry is applied to all `chat/2` calls. **Streaming `chat_stream/3` is not retried**
+because partial SSE chunks may already have been emitted to the caller before a
+mid-stream error occurs.
 
 ---
 
@@ -431,10 +479,28 @@ Sub-agent constraints:
 |-----------|-------|
 | Max iterations per sub-agent | 8 |
 | Token budget per sub-agent | 25 000 |
-| Mode | Always `:readonly` |
+| Mode | Inherits from caller (passed through `execute/3`) |
 | Recursive delegation | Blocked (`delegate` excluded from `safe_definitions/0`) |
 | Timeout per sub-agent | 120 s |
 | Failure handling | `yield_many` - one crash/timeout does not abort other sub-agents |
+
+> **Budget note:** Sub-agent budgets are independent (shared-nothing). Total token
+> spend for a parallel run = orchestrator calls (plan + synthesize) + sum of all
+> sub-agent budgets. With 4 sub-agents at 25 000 tokens each, real spend can reach
+> ~105 000 tokens regardless of the main agent's `token_budget` setting.
+
+---
+
+## Context Compression
+
+When cumulative token usage exceeds `:compress_token_threshold`, the oldest
+messages are summarized via a crash-isolated `Task` and replaced with a single
+`[CONTEXT SUMMARY]` message. The most recent 4 messages are always kept verbatim.
+
+The compression split point is adjusted to **never orphan a `tool_result` message**
+from its preceding `tool_use`. If no safe split exists (the entire history up to the
+split boundary consists of tool turns), the compression round is skipped rather than
+producing an invalid message sequence.
 
 ---
 
@@ -448,7 +514,7 @@ following conditions is met:
 | LLM response contains `DONE:` | Output is the full response text |
 | `max_iterations` reached | `"Max iterations (N) reached"` |
 | Token budget exhausted | `"Budget exceeded. Token: X/Y (Z%)"` |
-| LLM returns an error | `"LLM error: ..."` |
+| LLM returns an error (after retries) | `"LLM error: ..."` |
 
 **`DONE:` detection** uses `String.contains?/2` - the word `DONE:` can appear
 anywhere in the LLM response, not just at the start. This accommodates natural
@@ -460,15 +526,6 @@ each tool result message:
 > provide your final answer now and include 'DONE:' in the response."*
 
 This prevents the LLM from over-exploring when it already has the data it needs.
-
----
-
-## Context Compression
-
-When cumulative token usage exceeds `:compress_token_threshold`, the oldest
-messages are summarized in a background `Task` (non-blocking) and replaced with a
-single `[CONTEXT SUMMARY]` message. The most recent 4 messages are always kept
-verbatim.
 
 ---
 
@@ -504,14 +561,15 @@ key is overridden to `MiniAgent.MockLLM` (a Mox double) in the test environment
 via `config/test.exs`.
 
 ```bash
-mix test                                                        # all tests
-mix test test/mini_agent_test.exs                               # integration tests only
-mix test test/mini_agent/budget_test.exs                        # unit tests for a single module
-mix test test/mini_agent/checkpoint_test.exs                    # checkpoint save/load/list/delete
-mix test test/mini_agent/llm/anthropic_stream_parser_test.exs   # Anthropic SSE parser unit tests
-mix test test/mini_agent/llm/deepseek_stream_parser_test.exs    # DeepSeek SSE parser unit tests
-mix test test/mini_agent/sub_agent_test.exs                     # SubAgent unit tests
-mix test test/mini_agent/orchestrator_test.exs                  # Orchestrator unit tests
+mix test                                                          # all tests
+mix test test/mini_agent_test.exs                                 # integration tests only
+mix test test/mini_agent/budget_test.exs                          # unit tests for a single module
+mix test test/mini_agent/checkpoint_test.exs                      # checkpoint save/load/list/delete
+mix test test/mini_agent/llm/retry_test.exs                       # retry backoff unit tests
+mix test test/mini_agent/llm/anthropic_stream_parser_test.exs     # Anthropic SSE parser unit tests
+mix test test/mini_agent/llm/deepseek_stream_parser_test.exs      # DeepSeek SSE parser unit tests
+mix test test/mini_agent/sub_agent_test.exs                       # SubAgent unit tests
+mix test test/mini_agent/orchestrator_test.exs                    # Orchestrator unit tests
 ```
 
 Test categories:
@@ -520,12 +578,13 @@ Test categories:
 |------|------|-------|
 | `mini_agent_test.exs` | Integration | Full agent loop, MockLLM, tool dispatch |
 | `budget_test.exs` | Unit | Pure struct functions |
-| `checkpoint_test.exs` | Unit | save/load round-trip, version guard, list, delete |
-| `memory_test.exs` | Unit | Threshold logic + compression path |
+| `checkpoint_test.exs` | Unit | save/load round-trip, version guard, list, delete, clock injection |
+| `memory_test.exs` | Unit | Threshold logic, compression path, tool_use/tool_result boundary safety |
 | `permission_test.exs` | Unit | `:auto` and `:readonly` modes |
-| `tools_test.exs` | Unit | Dispatcher, file read/write in tmp/ |
+| `tools_test.exs` | Unit | Dispatcher, file read/write/offset pagination in tmp/ |
 | `llm_test.exs` | Unit | `extract_text`, `extract_tool_calls`, `usage` for Anthropic |
 | `llm/deepseek_test.exs` | Unit | `extract_text`, `extract_tool_calls`, `usage` for DeepSeek |
+| `llm/retry_test.exs` | Unit | Retryable vs non-retryable errors, max retries, backoff call count |
 | `llm/anthropic_stream_parser_test.exs` | Unit | Anthropic SSE parsing, tool lifecycle, token counting, round-trip |
 | `llm/deepseek_stream_parser_test.exs` | Unit | OpenAI SSE parsing, tool slot accumulation, round-trip |
 | `sub_agent_test.exs` | Unit | Loop termination, tool execution, budget/iteration caps |
@@ -546,4 +605,7 @@ Test categories:
 | 7 | Real-time streaming - Anthropic SSE + DeepSeek SSE | Done |
 | 8 | Sub-agents + Orchestrator (parallel fan-out) | Done |
 | 9 | Checkpoint and resume (save/restore agent state) | Done |
-| 10 | MCP integration (Model Context Protocol tools) | Planned |
+| 10 | read_file offset pagination | Done |
+| 11 | LLM retry with exponential backoff | Done |
+| 12 | Runtime workspace override (--workspace flag) | Done |
+| 13 | MCP integration (Model Context Protocol tools) | Planned |

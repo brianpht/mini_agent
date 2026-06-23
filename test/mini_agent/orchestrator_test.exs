@@ -106,9 +106,9 @@ defmodule MiniAgent.OrchestratorTest do
       |> expect(:chat, 2, fn _messages, _opts ->
         {:ok, done_response("DONE: subtask done")}
       end)
-      # synthesis fails
+      # synthesis fails with a non-retryable error
       |> expect(:chat, fn _messages, _opts ->
-        {:error, "timeout"}
+        {:error, "HTTP 400: bad synthesis request"}
       end)
 
       result = MiniAgent.Orchestrator.run("Complex task", mode: :readonly)

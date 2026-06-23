@@ -73,5 +73,76 @@ defmodule MiniAgent.MemoryTest do
       assert first["role"] == "user"
       assert String.starts_with?(first["content"], "[CONTEXT SUMMARY]")
     end
+
+    test "does not orphan a tool_result at the split boundary" do
+      # Build: [user, asst+tool_use, user+tool_result, asst, user, asst, user, asst, user, asst]
+      # That is 10 messages. Default split_at = 10 - 4 = 6.
+      # Message at index 6 is a user+tool_result - must be walked back.
+      tool_use_msg = %{
+        "role" => "assistant",
+        "content" => [
+          %{"type" => "tool_use", "id" => "t1", "name" => "read_file", "input" => %{}}
+        ]
+      }
+
+      tool_result_msg = %{
+        "role" => "user",
+        "content" => [%{"type" => "tool_result", "tool_use_id" => "t1", "content" => "data"}]
+      }
+
+      plain = fn i -> %{"role" => "user", "content" => "msg #{i}"} end
+
+      msgs = [
+        plain.(1),
+        plain.(2),
+        plain.(3),
+        plain.(4),
+        tool_use_msg,
+        tool_result_msg,
+        plain.(7),
+        plain.(8),
+        plain.(9),
+        plain.(10)
+      ]
+
+      result = Memory.maybe_compress(msgs, over_threshold())
+
+      # The first message of recent must NOT be a tool_result
+      [_summary | recent] = result
+
+      refute match?(
+               %{"content" => [%{"type" => "tool_result"} | _]},
+               hd(recent)
+             )
+    end
+
+    test "skips compression when all old messages are tool turns (safe split < 2)" do
+      # 6 messages: [user, asst+tool_use, user+tool_result, asst+tool_use, user+tool_result, asst]
+      # split_at = 6 - 4 = 2. msg[2] = user+tool_result -> walk back to 1 -> still < 2 -> skip
+      tool_pair = fn id ->
+        [
+          %{
+            "role" => "assistant",
+            "content" => [
+              %{"type" => "tool_use", "id" => id, "name" => "read_file", "input" => %{}}
+            ]
+          },
+          %{
+            "role" => "user",
+            "content" => [%{"type" => "tool_result", "tool_use_id" => id, "content" => "x"}]
+          }
+        ]
+      end
+
+      msgs =
+        [%{"role" => "user", "content" => "task"}] ++
+          tool_pair.("a") ++
+          tool_pair.("b") ++
+          [%{"role" => "assistant", "content" => "thinking"}]
+
+      result = Memory.maybe_compress(msgs, over_threshold())
+      # Compression skipped - messages returned unchanged
+      assert result == msgs
+    end
   end
 end

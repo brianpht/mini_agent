@@ -1,5 +1,16 @@
 defmodule MiniAgent.Budget do
-  @moduledoc "Tracks and enforces token consumption quota. Pure struct - no process."
+  @moduledoc """
+  Tracks and enforces token consumption quota. Pure struct - no process.
+
+  Each agent and sub-agent owns an independent Budget (shared-nothing). When
+  the orchestrator fans out to N sub-agents, total real token spend is:
+
+    orchestrator_plan + orchestrator_synthesize + sum(sub_agent budgets)
+
+  This can exceed the main agent's `limit` because sub-agent budgets are not
+  deducted from the calling agent. Document expected parallelism and set
+  sub-agent limits accordingly in config.
+  """
 
   @enforce_keys [:limit]
   defstruct used: 0, limit: 50_000

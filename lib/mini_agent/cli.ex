@@ -15,9 +15,18 @@ defmodule MiniAgent.CLI do
           parallel: :boolean,
           resume: :string,
           list: :boolean,
-          delete: :string
+          delete: :string,
+          workspace: :string
         ],
-        aliases: [m: :mode, a: :auto, s: :stream, p: :parallel, r: :resume, l: :list]
+        aliases: [
+          m: :mode,
+          a: :auto,
+          s: :stream,
+          p: :parallel,
+          r: :resume,
+          l: :list,
+          w: :workspace
+        ]
       )
 
     cond do
@@ -29,6 +38,7 @@ defmodule MiniAgent.CLI do
         IO.puts("Deleted session #{opts[:delete]}")
 
       opts[:resume] ->
+        apply_workspace_override(opts)
         run_resume(opts[:resume], opts)
 
       true ->
@@ -42,6 +52,7 @@ defmodule MiniAgent.CLI do
           print_usage()
         else
           mode = parse_mode(opts)
+          apply_workspace_override(opts)
           IO.puts("\nMini Agent starting (mode: #{mode})")
           IO.puts("Task: #{task}\n")
           execute(task, mode, opts)
@@ -56,6 +67,17 @@ defmodule MiniAgent.CLI do
       opts[:mode] == "readonly" -> :readonly
       opts[:mode] == "auto" -> :auto
       true -> :ask
+    end
+  end
+
+  # Override workspace at runtime so the escript can target any project directory
+  # without recompiling. Note: Application.put_env is node-global; safe for the
+  # single-agent CLI use case (one agent per OS process).
+  @spec apply_workspace_override(keyword()) :: :ok
+  defp apply_workspace_override(opts) do
+    case opts[:workspace] do
+      nil -> :ok
+      path -> Application.put_env(:mini_agent, :workspace, Path.expand(path))
     end
   end
 
@@ -162,14 +184,15 @@ defmodule MiniAgent.CLI do
     IO.puts("""
     Mini Agent - usage:
 
-      ./mini_agent "your task"               run new task
-      ./mini_agent --mode readonly "task"    readonly mode
-      ./mini_agent --mode auto "task"        auto-approve all tools
-      ./mini_agent --stream "task"           streaming output
-      ./mini_agent --parallel "task"         orchestrator / sub-agents
-      ./mini_agent --list                    list saved checkpoints
-      ./mini_agent --resume <id>             resume an in-progress session
-      ./mini_agent --delete <id>             delete a checkpoint
+      ./mini_agent "your task"                        run new task
+      ./mini_agent --mode readonly "task"             readonly mode
+      ./mini_agent --mode auto "task"                 auto-approve all tools
+      ./mini_agent --stream "task"                    streaming output
+      ./mini_agent --parallel "task"                  orchestrator / sub-agents
+      ./mini_agent --workspace /path/to/project "task" override workspace root
+      ./mini_agent --list                             list saved checkpoints
+      ./mini_agent --resume <id>                      resume an in-progress session
+      ./mini_agent --delete <id>                      delete a checkpoint
     """)
 
     :ok

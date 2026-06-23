@@ -8,10 +8,20 @@ defmodule MiniAgent.Orchestrator do
   a single coherent response.
 
   Called directly by MiniAgent.CLI with --parallel flag, or invoked
-  from MiniAgent.Tools.execute/2 when the agent calls the delegate tool.
+  from MiniAgent.Tools.execute/3 when the agent calls the delegate tool.
+
+  ## Budget note
+
+  Total token spend for one orchestrator run:
+    plan_call + synthesize_call + sum(sub-agent budgets)
+
+  Sub-agent budgets are independent and not deducted from the calling
+  agent's budget. With 4 sub-agents each capped at SubAgent.@sub_budget,
+  total spend can significantly exceed the caller's budget.limit. This is
+  intentional (shared-nothing isolation) - set limits accordingly.
   """
 
-  alias MiniAgent.SubAgent
+  alias MiniAgent.{LLM.Retry, SubAgent}
 
   @plan_system "You are a task planner. Output only a plain list of independent sub-tasks, one per line, no numbering, no explanation, no extra text."
   @synthesize_system "You are a results synthesizer. Combine findings from multiple sub-agents into one clear, complete answer."
@@ -55,7 +65,7 @@ defmodule MiniAgent.Orchestrator do
       }
     ]
 
-    case llm_module().chat(prompt, system: @plan_system) do
+    case Retry.with_retry(fn -> llm_module().chat(prompt, system: @plan_system) end) do
       {:ok, resp} ->
         resp
         |> llm_module().extract_text()
@@ -152,7 +162,7 @@ defmodule MiniAgent.Orchestrator do
       }
     ]
 
-    case llm_module().chat(prompt, system: @synthesize_system) do
+    case Retry.with_retry(fn -> llm_module().chat(prompt, system: @synthesize_system) end) do
       {:ok, resp} ->
         llm_module().extract_text(resp)
 

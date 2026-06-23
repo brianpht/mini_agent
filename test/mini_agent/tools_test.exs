@@ -35,42 +35,64 @@ defmodule MiniAgent.ToolsTest do
     end
   end
 
-  describe "execute/2 - unknown tool" do
+  describe "execute/3 - unknown tool" do
     test "returns error string for unknown tool" do
-      result = Tools.execute("nonexistent_tool", %{})
+      result = Tools.execute("nonexistent_tool", %{}, :auto)
       assert result =~ "Error"
       assert result =~ "nonexistent_tool"
     end
   end
 
-  describe "execute/2 - list_dir" do
+  describe "execute/3 - list_dir" do
     test "lists tmp directory" do
-      result = Tools.execute("list_dir", %{"path" => System.tmp_dir!()})
+      result = Tools.execute("list_dir", %{"path" => System.tmp_dir!()}, :auto)
       assert is_binary(result)
     end
   end
 
-  describe "execute/2 - read_file" do
+  describe "execute/3 - read_file" do
     test "reads an existing file" do
       path = Path.join(System.tmp_dir!(), "mini_agent_test_read_#{System.unique_integer()}.txt")
       File.write!(path, "hello content")
 
-      result = Tools.execute("read_file", %{"path" => path})
+      result = Tools.execute("read_file", %{"path" => path}, :auto)
       assert result =~ "hello content"
 
       File.rm!(path)
     end
 
     test "returns error for missing file" do
-      result = Tools.execute("read_file", %{"path" => "/tmp/mini_agent_nonexistent_file.txt"})
+      result =
+        Tools.execute("read_file", %{"path" => "/tmp/mini_agent_nonexistent_file.txt"}, :auto)
+
       assert result =~ "Error"
+    end
+
+    test "returns truncation hint and allows paging with offset" do
+      path = Path.join(System.tmp_dir!(), "mini_agent_test_large_#{System.unique_integer()}.txt")
+      # Write more than 4000 bytes
+      large = String.duplicate("x", 5_000)
+      File.write!(path, large)
+
+      first = Tools.execute("read_file", %{"path" => path}, :auto)
+      assert first =~ "[truncated"
+      assert first =~ "use offset: 4000"
+
+      second = Tools.execute("read_file", %{"path" => path, "offset" => 4000}, :auto)
+      assert byte_size(second) == 1_000
+      refute second =~ "[truncated"
+
+      File.rm!(path)
     end
   end
 
-  describe "execute/2 - write_file" do
+  describe "execute/3 - write_file" do
     test "writes and reads back content" do
       path = Path.join(System.tmp_dir!(), "mini_agent_test_write_#{System.unique_integer()}.txt")
-      write_result = Tools.execute("write_file", %{"path" => path, "content" => "test data"})
+
+      write_result =
+        Tools.execute("write_file", %{"path" => path, "content" => "test data"}, :auto)
+
       assert write_result =~ "Wrote"
 
       assert File.read!(path) == "test data"
