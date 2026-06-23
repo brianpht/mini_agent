@@ -30,6 +30,28 @@ defmodule MiniAgent.OrchestratorTest do
     }
   end
 
+  describe "run/2 - :ask mode downgrade" do
+    test "downgrades :ask to :readonly and still returns a result" do
+      stub_llm_helpers()
+
+      MiniAgent.MockLLM
+      |> expect(:chat, fn _messages, [system: system] ->
+        assert String.contains?(system, "planner")
+        {:ok, done_response("Only one subtask")}
+      end)
+      |> expect(:chat, fn _messages, _opts ->
+        {:ok, done_response("DONE: finished")}
+      end)
+      |> expect(:chat, fn _messages, _opts ->
+        {:ok, done_response("Synthesized")}
+      end)
+
+      # :ask is passed but must be silently downgraded - no crash, no stdin race
+      result = MiniAgent.Orchestrator.run("Test ask downgrade", mode: :ask)
+      assert is_binary(result)
+    end
+  end
+
   describe "run/2 - plan phase" do
     test "splits task into subtasks and runs them" do
       stub_llm_helpers()

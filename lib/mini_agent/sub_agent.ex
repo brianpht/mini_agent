@@ -11,6 +11,7 @@ defmodule MiniAgent.SubAgent do
   """
 
   alias MiniAgent.{Budget, LLM.Retry, Permission, Tools}
+  alias MiniAgent.Tools.Context
 
   @max_iter 8
   @sub_budget 25_000
@@ -27,6 +28,7 @@ defmodule MiniAgent.SubAgent do
           iter: non_neg_integer(),
           budget: Budget.t(),
           mode: Permission.mode(),
+          workspace: String.t(),
           id: term(),
           output: String.t() | nil,
           done: boolean()
@@ -36,12 +38,17 @@ defmodule MiniAgent.SubAgent do
   Run a sub-task to completion. Returns {:ok, output} | {:error, reason}.
 
   Options:
-    - :mode  - :auto | :readonly | :ask (default: :readonly)
-    - :id    - identifier for logging (default: "?")
+    - :mode      - :auto | :readonly | :ask (default: :readonly)
+    - :workspace - sandbox root (default: Application.get_env :mini_agent, :workspace)
+    - :id        - identifier for logging (default: "?")
   """
   @spec run(String.t(), keyword()) :: {:ok, String.t()} | {:error, String.t()}
   def run(subtask, opts \\ []) do
     mode = Keyword.get(opts, :mode, :readonly)
+
+    workspace =
+      Keyword.get(opts, :workspace, Application.get_env(:mini_agent, :workspace, File.cwd!()))
+
     id = Keyword.get(opts, :id, "?")
 
     state = %{
@@ -49,6 +56,7 @@ defmodule MiniAgent.SubAgent do
       iter: 0,
       budget: %Budget{limit: @sub_budget},
       mode: mode,
+      workspace: workspace,
       id: id,
       output: nil,
       done: false
@@ -98,7 +106,8 @@ defmodule MiniAgent.SubAgent do
 
         cond do
           calls != [] ->
-            results = execute_tools(calls, s.mode, s.iter)
+            ctx = %Context{mode: s.mode, workspace: s.workspace}
+            results = execute_tools(calls, ctx, s.iter)
             tool_msg = %{"role" => "user", "content" => results}
             %{s | messages: s.messages ++ [tool_msg]}
 
@@ -120,13 +129,13 @@ defmodule MiniAgent.SubAgent do
     end
   end
 
-  @spec execute_tools(list(map()), Permission.mode(), non_neg_integer()) :: list(map())
-  defp execute_tools(calls, mode, iter) do
+  @spec execute_tools(list(map()), Context.t(), non_neg_integer()) :: list(map())
+  defp execute_tools(calls, ctx, iter) do
     results =
       Enum.map(calls, fn call ->
         output =
-          case Permission.check(call["name"], call["input"], mode) do
-            :allow -> Tools.execute(call["name"], call["input"], mode)
+          case Permission.check(call["name"], call["input"], ctx.mode) do
+            :allow -> Tools.execute(call["name"], call["input"], ctx)
             {:deny, reason} -> "Denied: #{reason}"
           end
 

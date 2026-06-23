@@ -19,6 +19,14 @@ defmodule MiniAgent.Orchestrator do
   agent's budget. With 4 sub-agents each capped at SubAgent.@sub_budget,
   total spend can significantly exceed the caller's budget.limit. This is
   intentional (shared-nothing isolation) - set limits accordingly.
+
+  ## :ask mode in parallel context
+
+  :ask mode requires interactive stdin prompts. Running it across N
+  concurrent sub-agents would race on a single stdin file descriptor.
+  Orchestrator.run/2 therefore downgrades :ask to :readonly automatically.
+  Use :auto explicitly if you want sub-agents to approve dangerous tools
+  without interaction.
   """
 
   alias MiniAgent.{LLM.Retry, SubAgent}
@@ -31,11 +39,32 @@ defmodule MiniAgent.Orchestrator do
   Returns the synthesized result string.
 
   Options:
-    - :mode - :auto | :readonly | :ask (default: :readonly)
+    - :mode      - :auto | :readonly | :ask (default: :readonly).
+                   :ask is downgraded to :readonly - see module doc.
+    - :workspace - sandbox root passed to sub-agents (default: Application env).
   """
   @spec run(String.t(), keyword()) :: String.t()
   def run(task, opts \\ []) do
-    mode = Keyword.get(opts, :mode, :readonly)
+    raw_mode = Keyword.get(opts, :mode, :readonly)
+
+    # :ask spawns interactive stdin prompts; N concurrent Tasks would race on
+    # the single stdin fd. Downgrade to :readonly so sub-agents can still read
+    # files and list directories without blocking on user input.
+    mode =
+      if raw_mode == :ask do
+        :telemetry.execute(
+          [:mini_agent, :orchestrator, :ask_downgraded],
+          %{},
+          %{reason: "parallel tasks cannot share stdin"}
+        )
+
+        :readonly
+      else
+        raw_mode
+      end
+
+    workspace =
+      Keyword.get(opts, :workspace, Application.get_env(:mini_agent, :workspace, File.cwd!()))
 
     :telemetry.execute([:mini_agent, :orchestrator, :start], %{}, %{task: task})
 
@@ -47,7 +76,7 @@ defmodule MiniAgent.Orchestrator do
       %{}
     )
 
-    results = run_parallel(subtasks, mode)
+    results = run_parallel(subtasks, mode, workspace)
     synthesize(task, results)
   end
 
@@ -94,20 +123,22 @@ defmodule MiniAgent.Orchestrator do
 
   # --- run_parallel ---
 
-  @spec run_parallel(list(String.t()), MiniAgent.Permission.mode()) ::
+  @spec run_parallel(list(String.t()), MiniAgent.Permission.mode(), String.t()) ::
           list({non_neg_integer(), String.t(), String.t()})
-  defp run_parallel(subtasks, mode) do
+  defp run_parallel(subtasks, mode, workspace) do
     indexed = Enum.with_index(subtasks, 1)
 
     # async_nolink: a single sub-agent crash does not kill the orchestrator
     tasks =
       Enum.map(indexed, fn {subtask, idx} ->
         Task.Supervisor.async_nolink(MiniAgent.TaskSupervisor, fn ->
-          run_sub_agent(subtask, idx, mode)
+          run_sub_agent(subtask, idx, mode, workspace)
         end)
       end)
 
-    # yield_many: partial success if some sub-agents time out
+    # yield_many timeout: 120 s.
+    # Worst case per sub-agent: @max_iter(8) * LLM.Retry max backoff(7 s) = 56 s.
+    # 120 s > 56 s, so the timeout safely covers full retry accumulation.
     tasks
     |> Task.yield_many(120_000)
     |> Enum.zip(indexed)
@@ -128,13 +159,13 @@ defmodule MiniAgent.Orchestrator do
 
   # --- sub_agent task body (extracted to keep run_parallel depth <= 2) ---
 
-  @spec run_sub_agent(String.t(), non_neg_integer(), MiniAgent.Permission.mode()) ::
+  @spec run_sub_agent(String.t(), non_neg_integer(), MiniAgent.Permission.mode(), String.t()) ::
           {non_neg_integer(), String.t(), String.t()}
-  defp run_sub_agent(subtask, idx, mode) do
+  defp run_sub_agent(subtask, idx, mode, workspace) do
     :telemetry.execute([:mini_agent, :orchestrator, :sub_agent_start], %{}, %{id: idx})
 
     result =
-      case SubAgent.run(subtask, mode: mode, id: idx) do
+      case SubAgent.run(subtask, mode: mode, workspace: workspace, id: idx) do
         {:ok, output} -> output
         {:error, reason} -> "Error: #{reason}"
       end

@@ -1,7 +1,7 @@
 defmodule MiniAgent.Tools do
   @moduledoc "Tool registry, Anthropic schema definitions, and dispatcher."
 
-  alias MiniAgent.Tools.{FileTool, ShellTool}
+  alias MiniAgent.Tools.{Context, FileTool, ShellTool}
 
   @type tool_name :: String.t()
   @type tool_input :: map()
@@ -65,40 +65,41 @@ defmodule MiniAgent.Tools do
   @doc """
   Dispatch tool execution by name. Uses static pattern matching - no apply/3.
 
-  The `mode` parameter is passed through to delegate so that sub-agents inherit
-  the calling agent's permission level rather than defaulting to :readonly.
+  The `ctx` parameter carries the calling agent's permission mode and sandbox
+  workspace. Both are propagated to sub-agents via the delegate clause so that
+  sub-agents always inherit the parent's context rather than re-reading globals.
   """
-  @spec execute(tool_name(), tool_input(), MiniAgent.Permission.mode()) :: tool_result()
-  def execute("read_file", input, _mode) do
-    result = FileTool.read_file(input)
+  @spec execute(tool_name(), tool_input(), Context.t()) :: tool_result()
+  def execute("read_file", input, %Context{workspace: ws} = _ctx) do
+    result = FileTool.read_file(input, ws)
     emit(:telemetry, "read_file")
     result
   end
 
-  def execute("list_dir", input, _mode) do
-    result = FileTool.list_dir(input)
+  def execute("list_dir", input, %Context{workspace: ws} = _ctx) do
+    result = FileTool.list_dir(input, ws)
     emit(:telemetry, "list_dir")
     result
   end
 
-  def execute("write_file", input, _mode) do
-    result = FileTool.write_file(input)
+  def execute("write_file", input, %Context{workspace: ws} = _ctx) do
+    result = FileTool.write_file(input, ws)
     emit(:telemetry, "write_file")
     result
   end
 
-  def execute("shell", input, _mode) do
-    result = ShellTool.run(input)
+  def execute("shell", input, %Context{workspace: ws} = _ctx) do
+    result = ShellTool.run(input, ws)
     emit(:telemetry, "shell")
     result
   end
 
-  def execute("delegate", %{"task" => task}, mode) do
+  def execute("delegate", %{"task" => task}, %Context{mode: mode, workspace: ws}) do
     emit(:telemetry, "delegate")
-    MiniAgent.Orchestrator.run(task, mode: mode)
+    MiniAgent.Orchestrator.run(task, mode: mode, workspace: ws)
   end
 
-  def execute(name, _input, _mode) do
+  def execute(name, _input, _ctx) do
     emit(:telemetry, name)
     "Error: unknown tool '#{name}'"
   end

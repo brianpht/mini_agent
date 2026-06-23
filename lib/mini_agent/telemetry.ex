@@ -1,5 +1,11 @@
 defmodule MiniAgent.Telemetry do
-  @moduledoc "Telemetry event handlers. The single location allowed to write to console."
+  @moduledoc """
+  Telemetry event handlers. The single location allowed to write log output to console.
+
+  Note: MiniAgent.Permission.ask_user_async/2 is the intentional interactive I/O
+  exception - it writes a prompt and reads stdin when mode is :ask. That is
+  user-facing interactive I/O, not log output, and is not routed through telemetry.
+  """
 
   @events [
     [:mini_agent, :tool, :executed],

@@ -94,8 +94,21 @@ defmodule MiniAgent.CLI do
 
   @spec run_orchestrator(String.t(), MiniAgent.Permission.mode()) :: :ok
   defp run_orchestrator(task, mode) do
+    effective_mode =
+      if mode == :ask do
+        IO.puts(
+          "Note: --parallel does not support :ask mode (concurrent Tasks cannot share stdin).\n" <>
+            "      Downgrading to :readonly. Use --mode auto to permit all tools without prompts."
+        )
+
+        :readonly
+      else
+        mode
+      end
+
+    workspace = Application.get_env(:mini_agent, :workspace, File.cwd!())
     IO.puts("Orchestrator mode: decomposing into sub-agents...\n")
-    output = MiniAgent.Orchestrator.run(task, mode: mode)
+    output = MiniAgent.Orchestrator.run(task, mode: effective_mode, workspace: workspace)
     IO.puts("\nDONE\n#{output}")
     :ok
   end

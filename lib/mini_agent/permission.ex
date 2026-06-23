@@ -7,6 +7,12 @@ defmodule MiniAgent.Permission do
   - :readonly - block any tool marked dangerous?, allow the rest
   - :ask      - prompt the user via stdin for dangerous tools
                 (IO.gets runs in a supervised Task to avoid blocking the caller)
+
+  Note: ask_user_async/2 is the intentional interactive I/O exception in this
+  system. It writes prompts and reads stdin directly - user-facing interactive
+  I/O, not log output. MiniAgent.Telemetry handles all log output; this is the
+  only non-telemetry console I/O, and it must never be called from concurrent
+  contexts (see Orchestrator module doc on :ask + --parallel).
   """
 
   @ask_timeout_ms 30_000

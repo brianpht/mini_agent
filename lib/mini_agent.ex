@@ -12,6 +12,7 @@ defmodule MiniAgent do
   use GenServer
 
   alias MiniAgent.{Budget, Checkpoint, LLM.Retry, Memory, Permission, Tools}
+  alias MiniAgent.Tools.Context
 
   @max_iterations Application.compile_env!(:mini_agent, :max_iterations)
   @run_timeout_ms 120_000
@@ -39,6 +40,7 @@ defmodule MiniAgent do
             last: String.t() | nil,
             budget: Budget.t() | nil,
             mode: MiniAgent.Permission.mode(),
+            workspace: String.t() | nil,
             stream_callback: (String.t() -> :ok) | nil,
             autosave: boolean()
           }
@@ -49,6 +51,7 @@ defmodule MiniAgent do
       :output,
       :last,
       :budget,
+      :workspace,
       :stream_callback,
       messages: [],
       iterations: 0,
@@ -115,6 +118,7 @@ defmodule MiniAgent do
       task: task,
       budget: Budget.new(),
       mode: Keyword.get(opts, :mode, :ask),
+      workspace: Application.get_env(:mini_agent, :workspace, File.cwd!()),
       autosave: Keyword.get(opts, :autosave, false),
       stream_callback: stream_callback
     }
@@ -231,6 +235,11 @@ defmodule MiniAgent do
   defp observe(%State{done: true} = state), do: state
 
   defp observe(%State{tool_calls: [_ | _] = calls} = state) do
+    ctx = %Context{
+      mode: state.mode,
+      workspace: state.workspace || Application.get_env(:mini_agent, :workspace, File.cwd!())
+    }
+
     results =
       Enum.map(calls, fn call ->
         tool_name = call["name"]
@@ -238,7 +247,7 @@ defmodule MiniAgent do
 
         output =
           case Permission.check(tool_name, tool_input, state.mode) do
-            :allow -> Tools.execute(tool_name, tool_input, state.mode)
+            :allow -> Tools.execute(tool_name, tool_input, ctx)
             {:deny, reason} -> "Denied: #{reason}"
           end
 

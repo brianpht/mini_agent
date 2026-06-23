@@ -2,6 +2,15 @@ defmodule MiniAgent.ToolsTest do
   use ExUnit.Case, async: true
 
   alias MiniAgent.Tools
+  alias MiniAgent.Tools.Context
+
+  # Build a context using the test-env workspace (System.tmp_dir!() per test.exs).
+  defp ctx(mode \\ :auto) do
+    %Context{
+      mode: mode,
+      workspace: Application.get_env(:mini_agent, :workspace, System.tmp_dir!())
+    }
+  end
 
   describe "definitions/0" do
     test "returns a non-empty list" do
@@ -37,7 +46,7 @@ defmodule MiniAgent.ToolsTest do
 
   describe "execute/3 - unknown tool" do
     test "returns error string for unknown tool" do
-      result = Tools.execute("nonexistent_tool", %{}, :auto)
+      result = Tools.execute("nonexistent_tool", %{}, ctx())
       assert result =~ "Error"
       assert result =~ "nonexistent_tool"
     end
@@ -45,7 +54,7 @@ defmodule MiniAgent.ToolsTest do
 
   describe "execute/3 - list_dir" do
     test "lists tmp directory" do
-      result = Tools.execute("list_dir", %{"path" => System.tmp_dir!()}, :auto)
+      result = Tools.execute("list_dir", %{"path" => System.tmp_dir!()}, ctx())
       assert is_binary(result)
     end
   end
@@ -55,7 +64,7 @@ defmodule MiniAgent.ToolsTest do
       path = Path.join(System.tmp_dir!(), "mini_agent_test_read_#{System.unique_integer()}.txt")
       File.write!(path, "hello content")
 
-      result = Tools.execute("read_file", %{"path" => path}, :auto)
+      result = Tools.execute("read_file", %{"path" => path}, ctx())
       assert result =~ "hello content"
 
       File.rm!(path)
@@ -63,7 +72,7 @@ defmodule MiniAgent.ToolsTest do
 
     test "returns error for missing file" do
       result =
-        Tools.execute("read_file", %{"path" => "/tmp/mini_agent_nonexistent_file.txt"}, :auto)
+        Tools.execute("read_file", %{"path" => "/tmp/mini_agent_nonexistent_file.txt"}, ctx())
 
       assert result =~ "Error"
     end
@@ -74,11 +83,11 @@ defmodule MiniAgent.ToolsTest do
       large = String.duplicate("x", 5_000)
       File.write!(path, large)
 
-      first = Tools.execute("read_file", %{"path" => path}, :auto)
+      first = Tools.execute("read_file", %{"path" => path}, ctx())
       assert first =~ "[truncated"
       assert first =~ "use offset: 4000"
 
-      second = Tools.execute("read_file", %{"path" => path, "offset" => 4000}, :auto)
+      second = Tools.execute("read_file", %{"path" => path, "offset" => 4000}, ctx())
       assert byte_size(second) == 1_000
       refute second =~ "[truncated"
 
@@ -91,7 +100,7 @@ defmodule MiniAgent.ToolsTest do
       path = Path.join(System.tmp_dir!(), "mini_agent_test_write_#{System.unique_integer()}.txt")
 
       write_result =
-        Tools.execute("write_file", %{"path" => path, "content" => "test data"}, :auto)
+        Tools.execute("write_file", %{"path" => path, "content" => "test data"}, ctx())
 
       assert write_result =~ "Wrote"
 

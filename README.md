@@ -66,13 +66,14 @@ lib/
     checkpoint.ex                # Checkpoint save/load/list/delete - JSON on disk
     memory.ex                    # Context compression (token-based threshold)
     permission.ex                # :auto | :ask | :readonly gate
-    tools.ex                     # Tool registry and dispatcher (incl. delegate)
+    tools.ex                     # Tool registry and dispatcher (execute/3 + ToolContext)
     tools/
+      context.ex                 # ToolContext struct - mode + workspace passed through dispatch
       file_tool.ex               # read_file (with offset), write_file, list_dir
       shell_tool.ex              # Whitelisted shell commands
     sub_agent.ex                 # Lightweight pure-function agent loop
     orchestrator.ex              # plan -> parallel fan-out -> synthesize
-    telemetry.ex                 # Sole location for console output
+    telemetry.ex                 # Sole location for log output to console
     cli.ex                       # Escript entry point
 ```
 
@@ -246,8 +247,8 @@ Flags can be combined: `--stream --parallel --mode readonly`.
 ## Checkpoint and Resume
 
 Every agent run is assigned a **session ID** (`unix_ts-hex6`, e.g. `1750000000-a3f9c1`).
-The timestamp uses `:erlang.system_time(:second)` (not wall clock) for monotonic
-stability. With `autosave: true` (default for CLI), the agent writes a snapshot to
+The timestamp uses `:erlang.system_time(:second)` (wall-second clock - not monotonic;
+suitable for session IDs and audit logs, not duration measurement) for sortable IDs. With `autosave: true` (default for CLI), the agent writes a snapshot to
 `.mini_agent/checkpoints/<session_id>.json` after **every completed iteration**.
 An append-only `.history` file records the timestamp of each save for audit.
 
@@ -298,6 +299,7 @@ The checkpoint file is plain JSON, human-readable and diff-friendly:
   "saved_at": "2026-06-22T10:15:33.421Z",
   "task": "Read lib/mini_agent.ex and summarise the architecture",
   "mode": "readonly",
+  "workspace": "/home/user/projects/my_app",
   "iterations": 3,
   "done": false,
   "output": "The architecture is...",
@@ -314,6 +316,7 @@ The checkpoint file is plain JSON, human-readable and diff-friendly:
 | Field | Persisted | Notes |
 |-------|-----------|-------|
 | `task`, `mode`, `iterations`, `done`, `output` | Yes | Core loop state |
+| `workspace` | Yes | Sandbox root - restored on resume so the agent targets the correct directory |
 | `budget.used` / `budget.limit` | Yes | Token accounting |
 | `messages` | Yes | Full conversation history, string-key normalised |
 | `session_id` | Yes | Stable across resume cycles |
@@ -337,8 +340,11 @@ The `:ask` approval prompt runs inside a supervised `Task` so the agent GenServe
 mailbox is never blocked while waiting for user input.
 
 Sub-agents spawned by the `delegate` tool or `--parallel` flag **inherit the calling
-agent's permission mode**. There is no implicit downgrade to `:readonly` - the mode
-passed at the CLI or via `Orchestrator.run/2` propagates through the full call chain.
+agent's permission mode**. One exception: **`:ask` is automatically downgraded to
+`:readonly` in the orchestrator**. Parallel Tasks cannot safely share a single stdin
+file descriptor - concurrent `IO.gets` calls would race and interleave prompts. If you
+want sub-agents to approve dangerous tools without interaction, pass `--mode auto`
+explicitly.
 
 ---
 
@@ -479,9 +485,9 @@ Sub-agent constraints:
 |-----------|-------|
 | Max iterations per sub-agent | 8 |
 | Token budget per sub-agent | 25 000 |
-| Mode | Inherits from caller (passed through `execute/3`) |
+| Mode | Inherits from caller (`:ask` downgraded to `:readonly` in parallel context) |
 | Recursive delegation | Blocked (`delegate` excluded from `safe_definitions/0`) |
-| Timeout per sub-agent | 120 s |
+| Timeout per sub-agent | 120 s (> worst-case 8 iter x 7 s retry backoff = 56 s) |
 | Failure handling | `yield_many` - one crash/timeout does not abort other sub-agents |
 
 > **Budget note:** Sub-agent budgets are independent (shared-nothing). Total token
@@ -608,4 +614,6 @@ Test categories:
 | 10 | read_file offset pagination | Done |
 | 11 | LLM retry with exponential backoff | Done |
 | 12 | Runtime workspace override (--workspace flag) | Done |
-| 13 | MCP integration (Model Context Protocol tools) | Planned |
+| 13 | ToolContext propagation - workspace threaded explicitly through dispatch (no global env reads in hot path) | Done |
+| 14 | :ask + --parallel safety - downgrade to :readonly, emit telemetry, print CLI notice | Done |
+| 15 | MCP integration (Model Context Protocol tools) | Planned |
