@@ -203,9 +203,17 @@ defmodule MiniAgent do
 
     result =
       case state.stream_callback do
-        nil -> Retry.with_retry(fn -> mod.chat(state.messages, llm_opts) end)
-        # Streaming: do not retry - partial chunks may already be emitted to caller.
-        cb -> mod.chat_stream(state.messages, cb, llm_opts)
+        nil ->
+          Retry.with_retry(fn -> mod.chat(state.messages, llm_opts) end)
+
+        # Streaming: retry only if no chunk has been received yet (connect-only retry).
+        # Once the first chunk reaches the caller, errors are not retried to
+        # prevent duplicate output.
+        cb ->
+          Retry.with_retry_stream(
+            fn guarded_cb -> mod.chat_stream(state.messages, guarded_cb, llm_opts) end,
+            cb
+          )
       end
 
     case result do

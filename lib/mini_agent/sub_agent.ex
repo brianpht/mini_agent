@@ -35,14 +35,15 @@ defmodule MiniAgent.SubAgent do
         }
 
   @doc """
-  Run a sub-task to completion. Returns {:ok, output} | {:error, reason}.
+  Run a sub-task to completion. Returns {:ok, output, tokens_used} | {:error, reason}.
 
   Options:
     - :mode      - :auto | :readonly | :ask (default: :readonly)
     - :workspace - sandbox root (default: Application.get_env :mini_agent, :workspace)
     - :id        - identifier for logging (default: "?")
   """
-  @spec run(String.t(), keyword()) :: {:ok, String.t()} | {:error, String.t()}
+  @spec run(String.t(), keyword()) ::
+          {:ok, String.t(), non_neg_integer()} | {:error, String.t()}
   def run(subtask, opts \\ []) do
     mode = Keyword.get(opts, :mode, :readonly)
 
@@ -63,7 +64,7 @@ defmodule MiniAgent.SubAgent do
     }
 
     final = loop(state)
-    {:ok, final.output || "(sub-agent #{id} produced no output)"}
+    {:ok, final.output || "(sub-agent #{id} produced no output)", final.budget.used}
   rescue
     e -> {:error, Exception.message(e)}
   end

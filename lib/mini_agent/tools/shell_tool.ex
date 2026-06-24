@@ -5,29 +5,33 @@ defmodule MiniAgent.Tools.ShellTool do
   The workspace root is passed explicitly by the caller (read once at the agent
   boundary) so that concurrent sub-agents can never interfere via a shared
   Application env key.
+
+  The shell whitelist is config-driven via:
+
+      config :mini_agent, :shell_whitelist, ~w[ls cat grep ...]
+
+  Falls back to @default_whitelist at compile time if no config is present.
   """
 
-  @allowed_commands MapSet.new(~w(ls cat grep find wc head tail echo mix git))
+  @default_whitelist ~w[ls cat grep find wc head tail echo mix git rg fd bat]
   @max_output_bytes 4_000
 
   @doc "Run a shell command if it is in the allowed whitelist."
   @spec run(map(), String.t()) :: String.t()
   def run(%{"command" => cmd}, workspace) do
+    whitelist = Application.get_env(:mini_agent, :shell_whitelist, @default_whitelist)
+    allowed_set = MapSet.new(whitelist)
+
     case String.split(cmd, " ", trim: true) do
       [] ->
         "Error: empty command"
 
       [bin | args] ->
-        if MapSet.member?(@allowed_commands, bin) do
+        if MapSet.member?(allowed_set, bin) do
           execute(bin, args, workspace)
         else
-          allowed =
-            @allowed_commands
-            |> MapSet.to_list()
-            |> Enum.sort()
-            |> Enum.join(", ")
-
-          "Error: '#{bin}' not in whitelist: #{allowed}"
+          allowed_str = whitelist |> Enum.sort() |> Enum.join(", ")
+          "Error: '#{bin}' not in whitelist: #{allowed_str}"
         end
     end
   end

@@ -77,6 +77,15 @@ defmodule MiniAgent.Orchestrator do
     )
 
     results = run_parallel(subtasks, mode, workspace)
+
+    total_tokens = results |> Enum.map(&elem(&1, 3)) |> Enum.sum()
+
+    :telemetry.execute(
+      [:mini_agent, :orchestrator, :sub_agents_done],
+      %{total_tokens: total_tokens},
+      %{subtask_count: length(results)}
+    )
+
     synthesize(task, results)
   end
 
@@ -124,7 +133,7 @@ defmodule MiniAgent.Orchestrator do
   # --- run_parallel ---
 
   @spec run_parallel(list(String.t()), MiniAgent.Permission.mode(), String.t()) ::
-          list({non_neg_integer(), String.t(), String.t()})
+          list({non_neg_integer(), String.t(), String.t(), non_neg_integer()})
   defp run_parallel(subtasks, mode, workspace) do
     indexed = Enum.with_index(subtasks, 1)
 
@@ -148,11 +157,11 @@ defmodule MiniAgent.Orchestrator do
           result
 
         {:exit, reason} ->
-          {idx, subtask, "Sub-agent #{idx} crashed: #{inspect(reason)}"}
+          {idx, subtask, "Sub-agent #{idx} crashed: #{inspect(reason)}", 0}
 
         nil ->
           Task.shutdown(task, :brutal_kill)
-          {idx, subtask, "Sub-agent #{idx} timed out"}
+          {idx, subtask, "Sub-agent #{idx} timed out", 0}
       end
     end)
   end
@@ -160,26 +169,30 @@ defmodule MiniAgent.Orchestrator do
   # --- sub_agent task body (extracted to keep run_parallel depth <= 2) ---
 
   @spec run_sub_agent(String.t(), non_neg_integer(), MiniAgent.Permission.mode(), String.t()) ::
-          {non_neg_integer(), String.t(), String.t()}
+          {non_neg_integer(), String.t(), String.t(), non_neg_integer()}
   defp run_sub_agent(subtask, idx, mode, workspace) do
     :telemetry.execute([:mini_agent, :orchestrator, :sub_agent_start], %{}, %{id: idx})
 
-    result =
+    {tokens, result} =
       case SubAgent.run(subtask, mode: mode, workspace: workspace, id: idx) do
-        {:ok, output} -> output
-        {:error, reason} -> "Error: #{reason}"
+        {:ok, output, n} -> {n, output}
+        {:error, reason} -> {0, "Error: #{reason}"}
       end
 
     :telemetry.execute([:mini_agent, :orchestrator, :sub_agent_done], %{}, %{id: idx})
-    {idx, subtask, result}
+    {idx, subtask, result, tokens}
   end
 
   # --- synthesize ---
 
-  @spec synthesize(String.t(), list({non_neg_integer(), String.t(), String.t()})) :: String.t()
+  @spec synthesize(
+          String.t(),
+          list({non_neg_integer(), String.t(), String.t(), non_neg_integer()})
+        ) ::
+          String.t()
   defp synthesize(task, results) do
     findings =
-      Enum.map_join(results, "\n\n", fn {idx, subtask, output} ->
+      Enum.map_join(results, "\n\n", fn {idx, subtask, output, _tokens} ->
         "### Sub-agent #{idx}: #{subtask}\n#{output}"
       end)
 

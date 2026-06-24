@@ -29,8 +29,9 @@ defmodule MiniAgent.SubAgentTest do
           (get_in(resp, ["usage", "output_tokens"]) || 0)
       end)
 
-      assert {:ok, output} = MiniAgent.SubAgent.run("list files in lib/", mode: :readonly)
+      assert {:ok, output, tokens} = MiniAgent.SubAgent.run("list files in lib/", mode: :readonly)
       assert String.starts_with?(output, "DONE:")
+      assert is_integer(tokens) and tokens >= 0
     end
 
     test "terminates after max iterations without DONE:" do
@@ -52,9 +53,12 @@ defmodule MiniAgent.SubAgentTest do
       |> stub(:extract_tool_calls, fn _resp -> [] end)
       |> stub(:usage, fn _resp -> 8 end)
 
-      assert {:ok, output} = MiniAgent.SubAgent.run("do something", mode: :readonly, id: "test")
+      assert {:ok, output, tokens} =
+               MiniAgent.SubAgent.run("do something", mode: :readonly, id: "test")
+
       # last output is the non-DONE text
       assert output == "still thinking..."
+      assert is_integer(tokens) and tokens >= 0
     end
 
     test "returns error when LLM returns error" do
@@ -66,8 +70,9 @@ defmodule MiniAgent.SubAgentTest do
       |> stub(:extract_tool_calls, fn _ -> [] end)
       |> stub(:usage, fn _ -> 0 end)
 
-      assert {:ok, output} = MiniAgent.SubAgent.run("failing task", mode: :readonly)
+      assert {:ok, output, tokens} = MiniAgent.SubAgent.run("failing task", mode: :readonly)
       assert String.contains?(output, "LLM error")
+      assert is_integer(tokens) and tokens >= 0
     end
 
     test "executes tool calls and appends results to messages" do
@@ -115,8 +120,11 @@ defmodule MiniAgent.SubAgentTest do
           (get_in(resp, ["usage", "output_tokens"]) || 0)
       end)
 
-      assert {:ok, output} = MiniAgent.SubAgent.run("explore project", mode: :readonly, id: 1)
+      assert {:ok, output, tokens} =
+               MiniAgent.SubAgent.run("explore project", mode: :readonly, id: 1)
+
       assert String.starts_with?(output, "DONE:")
+      assert is_integer(tokens) and tokens > 0
     end
   end
 end
