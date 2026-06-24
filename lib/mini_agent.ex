@@ -81,12 +81,21 @@ defmodule MiniAgent do
     case Checkpoint.load(session_id) do
       {:ok, base_state} ->
         autosave = Keyword.get(opts, :autosave, true)
-        stream_callback = if Keyword.get(opts, :stream, false), do: &IO.write/1, else: nil
+
+        stream_callback =
+          cond do
+            Keyword.has_key?(opts, :stream_callback) -> Keyword.get(opts, :stream_callback)
+            Keyword.get(opts, :stream, false) -> &IO.write/1
+            true -> nil
+          end
+
+        mode = Keyword.get(opts, :mode, base_state.mode)
 
         state = %{
           base_state
           | autosave: autosave,
-            stream_callback: stream_callback
+            stream_callback: stream_callback,
+            mode: mode
         }
 
         GenServer.start_link(__MODULE__, {:resume, state})
@@ -107,18 +116,24 @@ defmodule MiniAgent do
     Process.flag(:trap_exit, true)
 
     stream_callback =
-      if Keyword.get(opts, :stream, false) do
-        &IO.write/1
-      else
-        nil
+      cond do
+        Keyword.has_key?(opts, :stream_callback) -> Keyword.get(opts, :stream_callback)
+        Keyword.get(opts, :stream, false) -> &IO.write/1
+        true -> nil
       end
 
+    session_id =
+      Keyword.get_lazy(opts, :session_id, &Checkpoint.new_session_id/0)
+
     state = %State{
-      session_id: Checkpoint.new_session_id(),
+      session_id: session_id,
       task: task,
       budget: Budget.new(),
       mode: Keyword.get(opts, :mode, :ask),
-      workspace: Application.get_env(:mini_agent, :workspace, File.cwd!()),
+      workspace:
+        Keyword.get_lazy(opts, :workspace, fn ->
+          Application.get_env(:mini_agent, :workspace, File.cwd!())
+        end),
       autosave: Keyword.get(opts, :autosave, false),
       stream_callback: stream_callback
     }
@@ -136,6 +151,14 @@ defmodule MiniAgent do
     final = loop(state)
     {:reply, final.output || "(no output)", final}
   end
+
+  # Trap-exit is set in init/1 so that terminate/2 is always called for
+  # autosave. Tools (ShellTool via System.cmd Port, FileTool) link their
+  # short-lived OS processes to this agent. When those processes exit normally
+  # the BEAM converts the exit signal into an {:EXIT, pid, :normal} message.
+  # Drop them silently - they are not errors, just cleanup noise.
+  @impl GenServer
+  def handle_info({:EXIT, _pid, _reason}, state), do: {:noreply, state}
 
   @impl GenServer
   def terminate(_reason, %State{autosave: true} = state) do
@@ -159,7 +182,7 @@ defmodule MiniAgent do
       :telemetry.execute(
         [:mini_agent, :budget, :exceeded],
         %{used: state.budget.used},
-        %{report: Budget.report(state.budget)}
+        %{report: Budget.report(state.budget), session_id: state.session_id}
       )
 
       %{state | done: true, output: "Budget exceeded. #{Budget.report(state.budget)}"}
@@ -167,7 +190,7 @@ defmodule MiniAgent do
       :telemetry.execute(
         [:mini_agent, :iteration, :start],
         %{iteration: state.iterations},
-        %{}
+        %{session_id: state.session_id}
       )
 
       state
@@ -245,7 +268,8 @@ defmodule MiniAgent do
   defp observe(%State{tool_calls: [_ | _] = calls} = state) do
     ctx = %Context{
       mode: state.mode,
-      workspace: state.workspace || Application.get_env(:mini_agent, :workspace, File.cwd!())
+      workspace: state.workspace || Application.get_env(:mini_agent, :workspace, File.cwd!()),
+      session_id: state.session_id
     }
 
     results =

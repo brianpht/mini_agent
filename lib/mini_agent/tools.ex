@@ -70,37 +70,37 @@ defmodule MiniAgent.Tools do
   sub-agents always inherit the parent's context rather than re-reading globals.
   """
   @spec execute(tool_name(), tool_input(), Context.t()) :: tool_result()
-  def execute("read_file", input, %Context{workspace: ws} = _ctx) do
+  def execute("read_file", input, %Context{workspace: ws} = ctx) do
     result = FileTool.read_file(input, ws)
-    emit(:telemetry, "read_file")
+    emit(:telemetry, "read_file", ctx.session_id)
     result
   end
 
-  def execute("list_dir", input, %Context{workspace: ws} = _ctx) do
+  def execute("list_dir", input, %Context{workspace: ws} = ctx) do
     result = FileTool.list_dir(input, ws)
-    emit(:telemetry, "list_dir")
+    emit(:telemetry, "list_dir", ctx.session_id)
     result
   end
 
-  def execute("write_file", input, %Context{workspace: ws} = _ctx) do
+  def execute("write_file", input, %Context{workspace: ws} = ctx) do
     result = FileTool.write_file(input, ws)
-    emit(:telemetry, "write_file")
+    emit(:telemetry, "write_file", ctx.session_id)
     result
   end
 
-  def execute("shell", input, %Context{workspace: ws} = _ctx) do
+  def execute("shell", input, %Context{workspace: ws} = ctx) do
     result = ShellTool.run(input, ws)
-    emit(:telemetry, "shell")
+    emit(:telemetry, "shell", ctx.session_id)
     result
   end
 
-  def execute("delegate", %{"task" => task}, %Context{mode: mode, workspace: ws}) do
-    emit(:telemetry, "delegate")
+  def execute("delegate", %{"task" => task}, %Context{mode: mode, workspace: ws} = ctx) do
+    emit(:telemetry, "delegate", ctx.session_id)
     MiniAgent.Orchestrator.run(task, mode: mode, workspace: ws)
   end
 
-  def execute(name, _input, _ctx) do
-    emit(:telemetry, name)
+  def execute(name, _input, ctx) do
+    emit(:telemetry, name, ctx.session_id)
     "Error: unknown tool '#{name}'"
   end
 
@@ -120,8 +120,12 @@ defmodule MiniAgent.Tools do
     }
   end
 
-  @spec emit(:telemetry, tool_name()) :: :ok
-  defp emit(:telemetry, name) do
-    :telemetry.execute([:mini_agent, :tool, :executed], %{count: 1}, %{name: name})
+  @spec emit(:telemetry, tool_name(), String.t() | nil) :: :ok
+  defp emit(:telemetry, name, session_id) do
+    :telemetry.execute(
+      [:mini_agent, :tool, :executed],
+      %{count: 1},
+      %{name: name, session_id: session_id}
+    )
   end
 end

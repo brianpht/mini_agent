@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full bg-gray-950 text-gray-100">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="csrf-token" content={get_csrf_token()} />
+    <title>MiniAgent</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/phoenix@1.8.8/priv/static/phoenix.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/phoenix_live_view@1.2.3/priv/static/phoenix_live_view.min.js"></script>
+    <script>
+      const {Socket} = window.Phoenix
+      const {LiveSocket} = window.LiveView
+
+      const csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute("content")
+
+      const hooks = {
+        ScrollBottom: {
+          updated() { this.el.scrollTop = this.el.scrollHeight }
+        }
+      }
+
+      const liveSocket = new LiveSocket("/live", Socket, {
+        params: {_csrf_token: csrfToken},
+        hooks: hooks
+      })
+
+      liveSocket.connect()
+      window.liveSocket = liveSocket
+    </script>
+  </head>
+  <body class="h-full">
+    <%= @inner_content %>
+  </body>
+</html>
+

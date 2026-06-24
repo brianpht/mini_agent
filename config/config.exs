@@ -1,5 +1,13 @@
 import Config
 
+config :mini_agent, MiniAgentWeb.Endpoint,
+  adapter: Bandit.PhoenixAdapter,
+  http: [ip: {127, 0, 0, 1}, port: 4000],
+  server: true,
+  check_origin: false,
+  secret_key_base: "l9Ynoe3uMb7GhS2kPqXzVwRtDcAjFiKnLmBvHoEpQsTuYdWrCxZgNaIeOf8J1k56",
+  live_view: [signing_salt: "miniagnt"]
+
 config :mini_agent,
   model: "deepseek-chat",
   max_iterations: 8,

@@ -36,6 +36,8 @@ defmodule MiniAgent.Tools.ShellTool do
     end
   end
 
+  def run(_input, _workspace), do: "Error: missing required parameter 'command'"
+
   @spec execute(String.t(), list(String.t()), String.t()) :: String.t()
   defp execute(bin, args, workspace) do
     case System.cmd(bin, args, stderr_to_stdout: true, cd: workspace) do

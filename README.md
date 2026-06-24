@@ -12,12 +12,16 @@ permission gate guards dangerous operations. All non-determinism is injected (LL
 module, clock, workspace) so the core logic is fully testable offline with Mox - no
 API key required for the test suite.
 
+Accessible via **CLI (escript)** or a built-in **Phoenix LiveView web UI** at
+`http://localhost:4000` with real-time streaming output, activity feed, mode selector,
+parallel toggle, workspace override, and session resume - all without leaving the browser.
+
 Two LLM backends are included out of the box:
 
 - **`MiniAgent.LLM.DeepSeek`** (default) - OpenAI-compatible endpoint, requires `DEEPSEEK_API_KEY`
-  - Real-time token streaming via OpenAI SSE format (`--stream` flag)
+  - Real-time token streaming via OpenAI SSE format (`--stream` flag / always-on in LiveView)
 - **`MiniAgent.LLM.Anthropic`** - Anthropic Claude API, requires `ANTHROPIC_API_KEY`
-  - Real-time token streaming via Anthropic SSE format (`--stream` flag)
+  - Real-time token streaming via Anthropic SSE format (`--stream` flag / always-on in LiveView)
 
 ---
 
@@ -25,36 +29,43 @@ Two LLM backends are included out of the box:
 
 ```mermaid
 flowchart TD
+    Browser["Browser\nhttp://localhost:4000"] -->|HTTP + WebSocket| LV["MiniAgentWeb.AgentLive\nPhoenix LiveView"]
     CLI["MiniAgent.CLI\nescript entry"] -->|default| GS["MiniAgent\nGenServer"]
     CLI -->|--parallel| ORC["MiniAgent.Orchestrator\nplan + fan-out + synthesize"]
     CLI -->|--resume| CKP["MiniAgent.Checkpoint\nsave / load / list / delete"]
+    LV -->|"Task.Supervisor.async_nolink"| GS
+    LV -->|"parallel=ON"| ORC
+    LV -->|subscribe/publish| PS["MiniAgent.PubSub\nPhoenix.PubSub"]
+    BC["MiniAgent.AgentBroadcaster\ntelemetry -> PubSub"] --> PS
+    PS -->|handle_info| LV
     GS -->|perceive| MEM["MiniAgent.Memory\ncontext compression"]
     GS -->|act| BEH["MiniAgent.LLM.Behaviour\ninterface"]
     BEH --> ANT["MiniAgent.LLM.Anthropic\nClaude API"]
     BEH --> DS["MiniAgent.LLM.DeepSeek\nOpenAI-compat API"]
-    ANT -.->|streaming| ASP["MiniAgent.LLM.AnthropicStreamParser\nAnthropic SSE parser"]
-    DS -.->|streaming| DSP["MiniAgent.LLM.DeepSeekStreamParser\nOpenAI SSE parser"]
+    ANT -.->|streaming| ASP["AnthropicStreamParser\nAnthropic SSE"]
+    DS -.->|streaming| DSP["DeepSeekStreamParser\nOpenAI SSE"]
     BEH -.->|transient errors| RET["MiniAgent.LLM.Retry\nexponential backoff"]
     GS -->|observe| PERM["MiniAgent.Permission\npermission gate"]
     PERM --> TOOLS["MiniAgent.Tools\ndispatcher"]
     TOOLS --> FT["FileTool\nread/write/list"]
     TOOLS --> ST["ShellTool\nwhitelist exec"]
     TOOLS -->|delegate tool| ORC
+    TOOLS -->|telemetry incl. session_id| BC
     ORC -->|async_nolink x N| SUB["MiniAgent.SubAgent\npure-function loop"]
     SUB --> BEH
     GS -->|after each tick| CKP
-    GS -->|terminate| CKP
+    GS -->|stream_callback closure| PS
     GS --> BUD["MiniAgent.Budget\ntoken quota"]
-    GS --> TEL["MiniAgent.Telemetry\nevent handlers"]
     MEM -.->|crash-isolated Task| BEH
-    PERM -.->|async Task| IO["stdin\napproval"]
+    PERM -.->|async Task| IO["stdin\napproval (CLI only)"]
 ```
 
 ```
 lib/
-  mini_agent.ex                  # GenServer - main loop
+  mini_agent.ex                  # GenServer - main loop (accepts session_id:, workspace:, stream_callback: opts)
   mini_agent/
-    application.ex               # OTP Application + Task.Supervisor
+    application.ex               # OTP Application: TaskSupervisor + PubSub + Endpoint
+    agent_broadcaster.ex         # Telemetry -> PubSub bridge (session-aware routing)
     llm/
       behaviour.ex               # @callback contracts (enables Mox injection)
       retry.ex                   # Exponential-backoff retry wrapper for LLM calls
@@ -68,13 +79,22 @@ lib/
     permission.ex                # :auto | :ask | :readonly gate
     tools.ex                     # Tool registry and dispatcher (execute/3 + ToolContext)
     tools/
-      context.ex                 # ToolContext struct - mode + workspace passed through dispatch
+      context.ex                 # ToolContext struct - mode + workspace + session_id
       file_tool.ex               # read_file (with offset), write_file, list_dir
       shell_tool.ex              # Whitelisted shell commands
     sub_agent.ex                 # Lightweight pure-function agent loop
     orchestrator.ex              # plan -> parallel fan-out -> synthesize
     telemetry.ex                 # Sole location for log output to console
     cli.ex                       # Escript entry point
+  mini_agent_web/
+    endpoint.ex                  # Bandit HTTP + WebSocket, Plug pipeline
+    router.ex                    # live "/" -> AgentLive
+    components/
+      layouts.ex                 # Root layout with Tailwind CDN + Phoenix LiveView JS
+      layouts/root.html.heex
+    live/
+      agent_live.ex              # LiveView: task form, options panel, sessions panel,
+                                 # streaming output, activity feed
 ```
 
 ---
@@ -104,7 +124,32 @@ mix test
 mix escript.build
 ```
 
-### Default backend: DeepSeek
+### Web UI (recommended for interactive use)
+
+```bash
+# Store your API key
+echo 'export DEEPSEEK_API_KEY="sk-..."' > .env
+source .env
+
+# Start the server
+MIX_ENV=dev mix run --no-halt
+# Or in interactive shell:
+MIX_ENV=dev iex -S mix
+
+# Open http://localhost:4000
+```
+
+The web UI provides:
+
+| Feature | Description |
+|---------|-------------|
+| Task input | Multi-line textarea, submit with Enter or Run button |
+| Streaming output | LLM tokens appear in real-time as they arrive |
+| Activity feed | Live telemetry: iterations, tool calls, budget status |
+| **⚙ Options** | Mode toggle (ask/readonly/auto), Parallel on/off, Workspace override |
+| **⟳ Sessions** | List saved checkpoints, resume incomplete sessions |
+
+### Default backend: DeepSeek (CLI)
 
 ```bash
 # Store your key in a .env file (gitignored)
@@ -136,7 +181,7 @@ source .env
   "Summarise the architecture"
 ```
 
-### Anthropic backend
+### Anthropic backend (CLI)
 
 Edit `config/config.exs`:
 
@@ -220,6 +265,22 @@ Available `:llm_module` values:
 | `MiniAgent.LLM.DeepSeek` | OpenAI SSE | Default. `DEEPSEEK_API_KEY` required |
 | `MiniAgent.LLM.Anthropic` | Anthropic SSE | `ANTHROPIC_API_KEY` required |
 | `MiniAgent.MockLLM` | N/A | Test environment only - Mox double, no network |
+
+### Web UI configuration
+
+The endpoint is configured in `config/config.exs`:
+
+```elixir
+config :mini_agent, MiniAgentWeb.Endpoint,
+  adapter: Bandit.PhoenixAdapter,
+  http: [ip: {127, 0, 0, 1}, port: 4000],
+  server: true,
+  secret_key_base: "...",      # min 64 bytes
+  live_view: [signing_salt: "miniagnt"]
+```
+
+To disable the web UI entirely (e.g. escript-only builds), add `server: false` to the
+relevant config environment file.
 
 ---
 
@@ -614,6 +675,7 @@ Test categories:
 | 10 | read_file offset pagination | Done |
 | 11 | LLM retry with exponential backoff | Done |
 | 12 | Runtime workspace override (--workspace flag) | Done |
-| 13 | ToolContext propagation - workspace threaded explicitly through dispatch (no global env reads in hot path) | Done |
-| 14 | :ask + --parallel safety - downgrade to :readonly, emit telemetry, print CLI notice | Done |
-| 15 | MCP integration (Model Context Protocol tools) | Planned |
+| 13 | ToolContext propagation - workspace threaded explicitly through dispatch | Done |
+| 14 | :ask + --parallel safety - downgrade to :readonly, emit telemetry | Done |
+| 15 | Phoenix LiveView web UI - streaming output, activity feed, mode/parallel/workspace options, session resume | Done |
+| 16 | MCP integration (Model Context Protocol tools) | Planned |

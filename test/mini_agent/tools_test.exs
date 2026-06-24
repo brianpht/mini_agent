@@ -57,6 +57,12 @@ defmodule MiniAgent.ToolsTest do
       result = Tools.execute("list_dir", %{"path" => System.tmp_dir!()}, ctx())
       assert is_binary(result)
     end
+
+    test "returns error when path key is missing" do
+      result = Tools.execute("list_dir", %{}, ctx())
+      assert result =~ "Error"
+      assert result =~ "path"
+    end
   end
 
   describe "execute/3 - read_file" do
@@ -75,6 +81,12 @@ defmodule MiniAgent.ToolsTest do
         Tools.execute("read_file", %{"path" => "/tmp/mini_agent_nonexistent_file.txt"}, ctx())
 
       assert result =~ "Error"
+    end
+
+    test "returns error when path key is missing" do
+      result = Tools.execute("read_file", %{}, ctx())
+      assert result =~ "Error"
+      assert result =~ "path"
     end
 
     test "returns truncation hint and allows paging with offset" do
@@ -106,6 +118,14 @@ defmodule MiniAgent.ToolsTest do
 
       assert File.read!(path) == "test data"
       File.rm!(path)
+    end
+
+    test "returns error when required keys are missing" do
+      result = Tools.execute("write_file", %{"path" => "/tmp/x.txt"}, ctx())
+      assert result =~ "Error"
+
+      result2 = Tools.execute("write_file", %{}, ctx())
+      assert result2 =~ "Error"
     end
   end
 
@@ -155,6 +175,12 @@ defmodule MiniAgent.ToolsTest do
       assert result =~ "not in whitelist"
 
       Application.delete_env(:mini_agent, :shell_whitelist)
+    end
+
+    test "returns error when command key is missing" do
+      result = Tools.execute("shell", %{}, ctx())
+      assert result =~ "Error"
+      assert result =~ "command"
     end
   end
 end
