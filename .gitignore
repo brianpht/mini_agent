@@ -1,6 +1,5 @@
 .idea/
 mini_agent.iml
-mini_agent
 .env
 # The directory Mix will write compiled artifacts to.
 /_build/
@@ -26,3 +25,4 @@ mini_agent-*.tar
 # Temporary files, for example, from tests.
 /tmp/
 /.mini_agent/
+/mini_agent
