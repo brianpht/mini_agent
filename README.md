@@ -3,7 +3,7 @@
 A soft real-time, allocation-conscious Elixir/OTP coding agent that drives a
 **perceive -> act -> observe** loop against a configurable LLM backend.
 
-The agent can read, write, and list files; run whitelisted shell commands; compress
+  The agent can read, write, and list files; run whitelisted shell commands; compress
 its own context when token usage climbs; stream tokens in real-time as they arrive;
 decompose complex tasks into parallel sub-agents for fan-out execution; and
 **save its full state to disk after every iteration so it can resume exactly where it
@@ -13,8 +13,9 @@ module, clock, workspace) so the core logic is fully testable offline with Mox -
 API key required for the test suite.
 
 Accessible via **CLI (escript)** or a built-in **Phoenix LiveView web UI** at
-`http://localhost:4000` with real-time streaming output, activity feed, mode selector,
-parallel toggle, workspace override, and session resume - all without leaving the browser.
+`http://localhost:4000` with real-time streaming output, live activity feed (iterations,
+tool calls, sub-agent progress), mode selector, parallel toggle, workspace override, and
+session resume - all without leaving the browser.
 
 Two LLM backends are included out of the box:
 
@@ -34,9 +35,9 @@ flowchart TD
     CLI -->|--parallel| ORC["MiniAgent.Orchestrator\nplan + fan-out + synthesize"]
     CLI -->|--resume| CKP["MiniAgent.Checkpoint\nsave / load / list / delete"]
     LV -->|"Task.Supervisor.async_nolink"| GS
-    LV -->|"parallel=ON"| ORC
+    LV -->|"parallel=ON\n(+ session_id)"| ORC
     LV -->|subscribe/publish| PS["MiniAgent.PubSub\nPhoenix.PubSub"]
-    BC["MiniAgent.AgentBroadcaster\ntelemetry -> PubSub"] --> PS
+    BC["MiniAgent.AgentBroadcaster\ntelemetry -> PubSub\n(agent + orchestrator events)"] --> PS
     PS -->|handle_info| LV
     GS -->|perceive| MEM["MiniAgent.Memory\ncontext compression"]
     GS -->|act| BEH["MiniAgent.LLM.Behaviour\ninterface"]
@@ -50,7 +51,8 @@ flowchart TD
     TOOLS --> FT["FileTool\nread/write/list"]
     TOOLS --> ST["ShellTool\nwhitelist exec"]
     TOOLS -->|delegate tool| ORC
-    TOOLS -->|telemetry incl. session_id| BC
+    TOOLS -->|"telemetry incl. session_id"| BC
+    ORC -->|"telemetry incl. session_id"| BC
     ORC -->|async_nolink x N| SUB["MiniAgent.SubAgent\npure-function loop"]
     SUB --> BEH
     GS -->|after each tick| CKP
@@ -145,7 +147,7 @@ The web UI provides:
 |---------|-------------|
 | Task input | Multi-line textarea, submit with Enter or Run button |
 | Streaming output | LLM tokens appear in real-time as they arrive |
-| Activity feed | Live telemetry: iterations, tool calls, budget status |
+| Activity feed | Live telemetry: iterations, tool calls, budget status, sub-agent progress (plan / start / done / synthesize) |
 | **⚙ Options** | Mode toggle (ask/readonly/auto), Parallel on/off, Workspace override |
 | **⟳ Sessions** | List saved checkpoints, resume incomplete sessions |
 
@@ -228,7 +230,7 @@ MiniAgent.run(pid)
   mode: :auto, stream: true)
 MiniAgent.run(pid)
 
-# Orchestrator directly
+# Orchestrator directly (pass session_id for LiveView Activity feed)
 MiniAgent.Orchestrator.run("Analyse architecture, tools, and budget",
   mode: :readonly)
 
@@ -677,5 +679,6 @@ Test categories:
 | 12 | Runtime workspace override (--workspace flag) | Done |
 | 13 | ToolContext propagation - workspace threaded explicitly through dispatch | Done |
 | 14 | :ask + --parallel safety - downgrade to :readonly, emit telemetry | Done |
-| 15 | Phoenix LiveView web UI - streaming output, activity feed, mode/parallel/workspace options, session resume | Done |
-| 16 | MCP integration (Model Context Protocol tools) | Planned |
+| 15 | Phoenix LiveView web UI - streaming output, activity feed (single + parallel), mode/parallel/workspace options, session resume | Done |
+| 16 | Parallel mode real-time Activity feed - sub-agent plan/start/done/synthesize events | Done |
+| 17 | MCP integration (Model Context Protocol tools) | Planned |

@@ -168,7 +168,7 @@ defmodule MiniAgentWeb.AgentLive do
     Task.Supervisor.async_nolink(MiniAgent.TaskSupervisor, fn ->
       result =
         if parallel do
-          Orchestrator.run(task, mode: mode, workspace: workspace)
+          Orchestrator.run(task, mode: mode, workspace: workspace, session_id: session_id)
         else
           {:ok, pid} =
             MiniAgent.start_link(task,
@@ -271,6 +271,61 @@ defmodule MiniAgentWeb.AgentLive do
      socket
      |> assign(output: result, status: :done)
      |> update(:events, &[entry | &1])}
+  end
+
+  def handle_info({:agent_event, %{type: :orchestrator_start} = ev}, socket) do
+    entry = %{
+      icon: "plan",
+      color: "blue",
+      label: "Planning sub-tasks...",
+      time: format_time(ev.timestamp)
+    }
+
+    {:noreply, update(socket, :events, &[entry | &1])}
+  end
+
+  def handle_info({:agent_event, %{type: :orchestrator_planned, count: n} = ev}, socket) do
+    entry = %{
+      icon: "plan",
+      color: "blue",
+      label: "Planned #{n} sub-tasks",
+      time: format_time(ev.timestamp)
+    }
+
+    {:noreply, update(socket, :events, &[entry | &1])}
+  end
+
+  def handle_info({:agent_event, %{type: :sub_agent_start, id: id} = ev}, socket) do
+    entry = %{
+      icon: "sub",
+      color: "blue",
+      label: "Sub-agent #{id} started",
+      time: format_time(ev.timestamp)
+    }
+
+    {:noreply, update(socket, :events, &[entry | &1])}
+  end
+
+  def handle_info({:agent_event, %{type: :sub_agent_done, id: id} = ev}, socket) do
+    entry = %{
+      icon: "sub",
+      color: "green",
+      label: "Sub-agent #{id} done",
+      time: format_time(ev.timestamp)
+    }
+
+    {:noreply, update(socket, :events, &[entry | &1])}
+  end
+
+  def handle_info({:agent_event, %{type: :sub_agents_done, total_tokens: tokens} = ev}, socket) do
+    entry = %{
+      icon: "sync",
+      color: "blue",
+      label: "Synthesizing... (#{tokens} tokens used)",
+      time: format_time(ev.timestamp)
+    }
+
+    {:noreply, update(socket, :events, &[entry | &1])}
   end
 
   # Task supervisor DOWN message on crash
