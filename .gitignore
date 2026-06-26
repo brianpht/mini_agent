@@ -1,4 +1,5 @@
 .idea/
+.elixir_ls/
 mini_agent.iml
 .env
 .claude/
