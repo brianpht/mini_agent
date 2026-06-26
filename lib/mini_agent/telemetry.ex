@@ -11,7 +11,8 @@ defmodule MiniAgent.Telemetry do
     [:mini_agent, :tool, :executed],
     [:mini_agent, :budget, :exceeded],
     [:mini_agent, :memory, :compressed],
-    [:mini_agent, :iteration, :start]
+    [:mini_agent, :iteration, :start],
+    [:mini_agent, :orchestrator, :total_spend]
   ]
 
   @doc "Attach all handlers. Called once from Application.start/2."
@@ -44,6 +45,13 @@ defmodule MiniAgent.Telemetry do
   def handle_event([:mini_agent, :iteration, :start], %{iteration: i}, _m, _) do
     sep = String.duplicate("-", 50)
     IO.puts("\n#{sep}\nIteration #{i}\n#{sep}")
+  end
+
+  def handle_event([:mini_agent, :orchestrator, :total_spend], m, _meta, _) do
+    IO.puts(
+      "[orchestrator] Total token spend: #{m.total} " <>
+        "(plan: #{m.plan_tokens}, sub-agents: #{m.sub_tokens}, synthesize: #{m.synthesize_tokens})"
+    )
   end
 
   def handle_event(_event, _measurements, _metadata, _config), do: :ok

@@ -64,7 +64,7 @@ defmodule MiniAgent.SubAgentTest do
     test "returns error when LLM returns error" do
       MiniAgent.MockLLM
       |> expect(:chat, fn _messages, _opts ->
-        {:error, "HTTP 500: internal server error"}
+        {:error, :http_error}
       end)
       |> stub(:extract_text, fn _ -> "" end)
       |> stub(:extract_tool_calls, fn _ -> [] end)

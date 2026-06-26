@@ -1,9 +1,9 @@
 defmodule MiniAgent.LLM.Behaviour do
   @moduledoc "Behaviour contract for LLM client implementations. Allows Mox-based test doubles."
 
-  @doc "Send messages to the LLM. Returns {:ok, response_map} | {:error, reason}."
+  @doc "Send messages to the LLM. Returns {:ok, response_map} | {:error, error_type}."
   @callback chat(messages :: list(map()), opts :: keyword()) ::
-              {:ok, map()} | {:error, String.t()}
+              {:ok, map()} | {:error, MiniAgent.LLM.Error.t()}
 
   @doc """
   Streaming chat. Calls on_chunk for each text delta as it arrives.
@@ -13,7 +13,7 @@ defmodule MiniAgent.LLM.Behaviour do
               messages :: list(map()),
               on_chunk :: (String.t() -> :ok),
               opts :: keyword()
-            ) :: {:ok, map()} | {:error, String.t()}
+            ) :: {:ok, map()} | {:error, MiniAgent.LLM.Error.t()}
 
   @doc "Extract concatenated text from a response map."
   @callback extract_text(response :: map()) :: String.t()

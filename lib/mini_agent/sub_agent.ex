@@ -11,6 +11,7 @@ defmodule MiniAgent.SubAgent do
   """
 
   alias MiniAgent.{Budget, LLM.Retry, Permission, Tools}
+  alias MiniAgent.LLM.Error
   alias MiniAgent.Tools.Context
 
   @max_iter 8
@@ -126,7 +127,7 @@ defmodule MiniAgent.SubAgent do
         end
 
       {:error, reason} ->
-        %{s | done: true, output: "LLM error in sub-agent #{s.id}: #{reason}"}
+        %{s | done: true, output: "LLM error in sub-agent #{s.id}: #{Error.message(reason)}"}
     end
   end
 

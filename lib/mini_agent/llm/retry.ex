@@ -2,9 +2,9 @@ defmodule MiniAgent.LLM.Retry do
   @moduledoc """
   Exponential-backoff retry wrapper for LLM chat calls.
 
-  Retries transient failures (rate-limit 429, service-unavailable 503,
-  network timeouts, connection refused) up to @max_retries times with
-  doubling backoff starting at @base_backoff_ms.
+  Retries transient failures (rate-limit, service-unavailable, network
+  timeouts, connection refused) up to @max_retries times with doubling
+  backoff starting at @base_backoff_ms.
 
   Backoff schedule: 1 s, 2 s, 4 s (7 s total sleep for 3 retries).
 
@@ -15,19 +15,21 @@ defmodule MiniAgent.LLM.Retry do
   emitted, the attempt is treated as non-retryable to prevent duplicate output.
   """
 
+  alias MiniAgent.LLM.Error
+
   @max_retries 3
   @base_backoff_ms 1_000
 
   @doc """
   Call `fun` and retry on transient LLM errors.
 
-  `fun` must return `{:ok, term()} | {:error, String.t()}`.
+  `fun` must return `{:ok, term()} | {:error, Error.t()}`.
   Retries up to #{@max_retries} times with exponential backoff.
   Non-retryable errors (e.g. HTTP 4xx other than 429, 500) are returned
   immediately without retrying.
   """
-  @spec with_retry((-> {:ok, term()} | {:error, String.t()})) ::
-          {:ok, term()} | {:error, String.t()}
+  @spec with_retry((-> {:ok, term()} | {:error, Error.t()})) ::
+          {:ok, term()} | {:error, Error.t()}
   def with_retry(fun), do: do_retry(fun, 0)
 
   @doc """
@@ -39,25 +41,25 @@ defmodule MiniAgent.LLM.Retry do
   with_retry/1. Once a chunk reaches the caller, errors are returned
   immediately - no duplicate output.
 
-  `fun` signature: `(on_chunk :: (String.t() -> :ok) -> {:ok, term()} | {:error, String.t()})`
+  `fun` signature: `(on_chunk :: (String.t() -> :ok) -> {:ok, term()} | {:error, Error.t()})`
   """
   @spec with_retry_stream(
-          ((String.t() -> :ok) -> {:ok, term()} | {:error, String.t()}),
+          ((String.t() -> :ok) -> {:ok, term()} | {:error, Error.t()}),
           (String.t() -> :ok)
-        ) :: {:ok, term()} | {:error, String.t()}
+        ) :: {:ok, term()} | {:error, Error.t()}
   def with_retry_stream(fun, on_chunk), do: do_retry_stream(fun, on_chunk, 0)
 
   # --- private ---
 
-  @spec do_retry((-> {:ok, term()} | {:error, String.t()}), non_neg_integer()) ::
-          {:ok, term()} | {:error, String.t()}
+  @spec do_retry((-> {:ok, term()} | {:error, Error.t()}), non_neg_integer()) ::
+          {:ok, term()} | {:error, Error.t()}
   defp do_retry(fun, attempt) do
     case fun.() do
       {:ok, _} = ok ->
         ok
 
       {:error, reason} = err ->
-        if attempt < @max_retries and retryable?(reason) do
+        if attempt < @max_retries and Error.retryable?(reason) do
           :timer.sleep(backoff_ms(attempt))
           do_retry(fun, attempt + 1)
         else
@@ -67,10 +69,10 @@ defmodule MiniAgent.LLM.Retry do
   end
 
   @spec do_retry_stream(
-          ((String.t() -> :ok) -> {:ok, term()} | {:error, String.t()}),
+          ((String.t() -> :ok) -> {:ok, term()} | {:error, Error.t()}),
           (String.t() -> :ok),
           non_neg_integer()
-        ) :: {:ok, term()} | {:error, String.t()}
+        ) :: {:ok, term()} | {:error, Error.t()}
   defp do_retry_stream(fun, on_chunk, attempt) do
     # Fresh atomic per attempt - tracks whether any chunk reached the caller.
     # Index 1, default 0 = no chunk emitted. 1 = at least one chunk emitted.
@@ -86,7 +88,7 @@ defmodule MiniAgent.LLM.Retry do
         ok
 
       {:error, reason} = err ->
-        if attempt < @max_retries and retryable?(reason) and
+        if attempt < @max_retries and Error.retryable?(reason) and
              :atomics.get(received, 1) == 0 do
           :timer.sleep(backoff_ms(attempt))
           do_retry_stream(fun, on_chunk, attempt + 1)
@@ -99,11 +101,4 @@ defmodule MiniAgent.LLM.Retry do
   # backoff: attempt 0 -> 1000 ms, attempt 1 -> 2000 ms, attempt 2 -> 4000 ms
   @spec backoff_ms(non_neg_integer()) :: non_neg_integer()
   defp backoff_ms(attempt), do: trunc(@base_backoff_ms * :math.pow(2, attempt))
-
-  @spec retryable?(String.t() | term()) :: boolean()
-  defp retryable?(reason) when is_binary(reason) do
-    String.contains?(reason, ["429", "503", "timeout", "econnrefused", "connection refused"])
-  end
-
-  defp retryable?(_), do: false
 end

@@ -17,13 +17,14 @@ defmodule MiniAgent.LLM.DeepSeek do
   @behaviour MiniAgent.LLM.Behaviour
 
   alias MiniAgent.LLM.DeepSeekStreamParser
+  alias MiniAgent.LLM.Error
 
   @url "https://api.deepseek.com/v1/chat/completions"
   @model Application.compile_env!(:mini_agent, :model)
   @max_tokens Application.compile_env!(:mini_agent, :max_tokens)
 
   @impl MiniAgent.LLM.Behaviour
-  @spec chat(list(map()), keyword()) :: {:ok, map()} | {:error, String.t()}
+  @spec chat(list(map()), keyword()) :: {:ok, map()} | {:error, MiniAgent.LLM.Error.t()}
   def chat(messages, opts \\ []) do
     oai_messages = to_openai_messages(messages, opts[:system])
     oai_tools = opts[:tools] && Enum.map(opts[:tools], &to_openai_tool/1)
@@ -34,14 +35,14 @@ defmodule MiniAgent.LLM.DeepSeek do
 
     case Req.post(@url, json: body, headers: headers(), receive_timeout: 60_000) do
       {:ok, %{status: 200, body: resp}} -> {:ok, normalize_response(resp)}
-      {:ok, %{status: s, body: e}} -> {:error, "HTTP #{s}: #{inspect(e)}"}
-      {:error, reason} -> {:error, "Network: #{inspect(reason)}"}
+      {:ok, %{status: s, body: _e}} -> {:error, Error.classify_http(s)}
+      {:error, reason} -> {:error, Error.classify_network(reason)}
     end
   end
 
   @impl MiniAgent.LLM.Behaviour
   @spec chat_stream(list(map()), (String.t() -> :ok), keyword()) ::
-          {:ok, map()} | {:error, String.t()}
+          {:ok, map()} | {:error, MiniAgent.LLM.Error.t()}
   def chat_stream(messages, on_chunk, opts \\ []) when is_function(on_chunk, 1) do
     oai_messages = to_openai_messages(messages, opts[:system])
     oai_tools = opts[:tools] && Enum.map(opts[:tools], &to_openai_tool/1)
@@ -78,8 +79,8 @@ defmodule MiniAgent.LLM.DeepSeek do
 
     case result do
       {:ok, %{status: 200}} -> {:ok, DeepSeekStreamParser.to_response(final)}
-      {:ok, %{status: s, body: e}} -> {:error, "HTTP #{s}: #{inspect(e)}"}
-      {:error, reason} -> {:error, "Network: #{inspect(reason)}"}
+      {:ok, %{status: s, body: _e}} -> {:error, Error.classify_http(s)}
+      {:error, reason} -> {:error, Error.classify_network(reason)}
     end
   end
 

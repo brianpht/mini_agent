@@ -72,14 +72,14 @@ defmodule MiniAgentTest do
       stub_llm_helpers()
 
       expect(MiniAgent.MockLLM, :chat, fn _messages, _opts ->
-        {:error, "HTTP 500: internal server error"}
+        {:error, :http_error}
       end)
 
       {:ok, pid} = MiniAgent.start_link("some task", mode: :auto)
       output = MiniAgent.run(pid)
 
       assert output =~ "LLM error"
-      assert output =~ "HTTP 500"
+      assert output =~ "HTTP error"
     end
   end
 

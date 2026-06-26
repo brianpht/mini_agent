@@ -27,7 +27,8 @@ defmodule MiniAgent.AgentBroadcaster do
     [:mini_agent, :orchestrator, :planned],
     [:mini_agent, :orchestrator, :sub_agent_start],
     [:mini_agent, :orchestrator, :sub_agent_done],
-    [:mini_agent, :orchestrator, :sub_agents_done]
+    [:mini_agent, :orchestrator, :sub_agents_done],
+    [:mini_agent, :orchestrator, :total_spend]
   ]
 
   @doc "Attach telemetry handlers. Called once from Application.start/2."
@@ -123,6 +124,19 @@ defmodule MiniAgent.AgentBroadcaster do
       broadcast(sid, %{
         type: :sub_agents_done,
         total_tokens: tokens,
+        timestamp: DateTime.utc_now()
+      })
+    end)
+  end
+
+  def handle_event([:mini_agent, :orchestrator, :total_spend], m, meta, _) do
+    with_session(meta, fn sid ->
+      broadcast(sid, %{
+        type: :orchestrator_total_spend,
+        plan_tokens: m.plan_tokens,
+        sub_tokens: m.sub_tokens,
+        synthesize_tokens: m.synthesize_tokens,
+        total: m.total,
         timestamp: DateTime.utc_now()
       })
     end)

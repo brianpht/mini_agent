@@ -98,7 +98,7 @@ defmodule MiniAgent.OrchestratorTest do
       # plan call fails
       |> expect(:chat, fn _messages, [system: system] ->
         assert String.contains?(system, "planner")
-        {:error, "HTTP 500"}
+        {:error, :http_error}
       end)
       # single sub-agent call (fallback to original task)
       |> expect(:chat, fn _messages, _opts ->
@@ -130,7 +130,7 @@ defmodule MiniAgent.OrchestratorTest do
       end)
       # synthesis fails with a non-retryable error
       |> expect(:chat, fn _messages, _opts ->
-        {:error, "HTTP 400: bad synthesis request"}
+        {:error, :http_error}
       end)
 
       result = MiniAgent.Orchestrator.run("Complex task", mode: :readonly)

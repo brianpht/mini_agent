@@ -12,6 +12,7 @@ defmodule MiniAgent do
   use GenServer
 
   alias MiniAgent.{Budget, Checkpoint, LLM.Retry, Memory, Permission, Tools}
+  alias MiniAgent.LLM.Error
   alias MiniAgent.Tools.Context
 
   @max_iterations Application.compile_env!(:mini_agent, :max_iterations)
@@ -256,7 +257,7 @@ defmodule MiniAgent do
         }
 
       {:error, reason} ->
-        %{state | done: true, output: "LLM error: #{reason}"}
+        %{state | done: true, output: "LLM error: #{Error.message(reason)}"}
     end
   end
 

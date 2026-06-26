@@ -20,6 +20,10 @@ defmodule MiniAgent.Orchestrator do
   total spend can significantly exceed the caller's budget.limit. This is
   intentional (shared-nothing isolation) - set limits accordingly.
 
+  Total spend is tracked and emitted via the
+  `[:mini_agent, :orchestrator, :total_spend]` telemetry event with a full
+  breakdown (plan_tokens, sub_tokens, synthesize_tokens, total).
+
   ## :ask mode in parallel context
 
   :ask mode requires interactive stdin prompts. Running it across N
@@ -73,7 +77,7 @@ defmodule MiniAgent.Orchestrator do
       %{task: task, session_id: session_id}
     )
 
-    subtasks = plan(task)
+    {subtasks, plan_tokens} = plan(task)
 
     :telemetry.execute(
       [:mini_agent, :orchestrator, :planned],
@@ -83,20 +87,35 @@ defmodule MiniAgent.Orchestrator do
 
     results = run_parallel(subtasks, mode, workspace, session_id)
 
-    total_tokens = results |> Enum.map(&elem(&1, 3)) |> Enum.sum()
+    sub_tokens = results |> Enum.map(&elem(&1, 3)) |> Enum.sum()
 
     :telemetry.execute(
       [:mini_agent, :orchestrator, :sub_agents_done],
-      %{total_tokens: total_tokens},
+      %{total_tokens: sub_tokens},
       %{subtask_count: length(results), session_id: session_id}
     )
 
-    synthesize(task, results)
+    {final_text, synth_tokens} = synthesize(task, results)
+
+    grand_total = plan_tokens + sub_tokens + synth_tokens
+
+    :telemetry.execute(
+      [:mini_agent, :orchestrator, :total_spend],
+      %{
+        plan_tokens: plan_tokens,
+        sub_tokens: sub_tokens,
+        synthesize_tokens: synth_tokens,
+        total: grand_total
+      },
+      %{session_id: session_id}
+    )
+
+    final_text
   end
 
   # --- plan ---
 
-  @spec plan(String.t()) :: list(String.t())
+  @spec plan(String.t()) :: {list(String.t()), non_neg_integer()}
   defp plan(task) do
     prompt = [
       %{
@@ -110,16 +129,21 @@ defmodule MiniAgent.Orchestrator do
 
     case Retry.with_retry(fn -> llm_module().chat(prompt, system: @plan_system) end) do
       {:ok, resp} ->
-        resp
-        |> llm_module().extract_text()
-        |> String.split("\n", trim: true)
-        |> Enum.map(&strip_list_prefix/1)
-        |> Enum.reject(&(&1 == ""))
-        |> Enum.take(4)
-        |> fallback_to_original(task)
+        tokens = llm_module().usage(resp)
+
+        subtasks =
+          resp
+          |> llm_module().extract_text()
+          |> String.split("\n", trim: true)
+          |> Enum.map(&strip_list_prefix/1)
+          |> Enum.reject(&(&1 == ""))
+          |> Enum.take(4)
+          |> fallback_to_original(task)
+
+        {subtasks, tokens}
 
       {:error, _} ->
-        [task]
+        {[task], 0}
     end
   end
 
@@ -214,7 +238,7 @@ defmodule MiniAgent.Orchestrator do
           String.t(),
           list({non_neg_integer(), String.t(), String.t(), non_neg_integer()})
         ) ::
-          String.t()
+          {String.t(), non_neg_integer()}
   defp synthesize(task, results) do
     findings =
       Enum.map_join(results, "\n\n", fn {idx, subtask, output, _tokens} ->
@@ -233,10 +257,11 @@ defmodule MiniAgent.Orchestrator do
 
     case Retry.with_retry(fn -> llm_module().chat(prompt, system: @synthesize_system) end) do
       {:ok, resp} ->
-        llm_module().extract_text(resp)
+        tokens = llm_module().usage(resp)
+        {llm_module().extract_text(resp), tokens}
 
       {:error, reason} ->
-        "Synthesis failed (#{reason}). Raw results:\n\n#{findings}"
+        {"Synthesis failed (#{reason}). Raw results:\n\n#{findings}", 0}
     end
   end
 
