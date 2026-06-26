@@ -35,6 +35,7 @@ defmodule MiniAgent.MixProject do
       {:bandit, "~> 1.5"},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
+      {:lazy_html, ">= 0.1.0", only: :test},
       {:mox, "~> 1.2", only: :test},
       {:stream_data, "~> 1.1", only: :test}
     ]

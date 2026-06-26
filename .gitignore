@@ -1,6 +1,7 @@
 .idea/
 mini_agent.iml
 .env
+.claude/
 # The directory Mix will write compiled artifacts to.
 /_build/
 

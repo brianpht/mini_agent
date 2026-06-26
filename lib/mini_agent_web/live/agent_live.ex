@@ -49,7 +49,9 @@ defmodule MiniAgentWeb.AgentLive do
         show_options: false,
         # sessions panel
         sessions: [],
-        show_sessions: false
+        show_sessions: false,
+        # task monitoring
+        task_ref: nil
       )
 
     {:ok, socket}
@@ -105,25 +107,28 @@ defmodule MiniAgentWeb.AgentLive do
     stream_callback = build_stream_callback(sid)
     mode = socket.assigns.mode
 
-    Task.Supervisor.async_nolink(MiniAgent.TaskSupervisor, fn ->
-      case MiniAgent.resume(sid, stream_callback: stream_callback, mode: mode) do
-        {:ok, pid} ->
-          result = MiniAgent.run(pid)
+    %Task{pid: task_pid} =
+      Task.Supervisor.async_nolink(MiniAgent.TaskSupervisor, fn ->
+        case MiniAgent.resume(sid, stream_callback: stream_callback, mode: mode) do
+          {:ok, pid} ->
+            result = MiniAgent.run(pid)
 
-          AgentBroadcaster.broadcast(sid, %{
-            type: :done,
-            result: result,
-            timestamp: DateTime.utc_now()
-          })
+            AgentBroadcaster.broadcast(sid, %{
+              type: :done,
+              result: result,
+              timestamp: DateTime.utc_now()
+            })
 
-        {:error, reason} ->
-          AgentBroadcaster.broadcast(sid, %{
-            type: :done,
-            result: "Error resuming: #{reason}",
-            timestamp: DateTime.utc_now()
-          })
-      end
-    end)
+          {:error, reason} ->
+            AgentBroadcaster.broadcast(sid, %{
+              type: :done,
+              result: "Error resuming: #{reason}",
+              timestamp: DateTime.utc_now()
+            })
+        end
+      end)
+
+    task_ref = Process.monitor(task_pid)
 
     # Get task label from sessions list for display
     task_label =
@@ -141,7 +146,8 @@ defmodule MiniAgentWeb.AgentLive do
         status: :running,
         events: [],
         output: "",
-        show_sessions: false
+        show_sessions: false,
+        task_ref: task_ref
       )
 
     {:noreply, socket}
@@ -165,35 +171,40 @@ defmodule MiniAgentWeb.AgentLive do
 
     stream_callback = build_stream_callback(session_id)
 
-    Task.Supervisor.async_nolink(MiniAgent.TaskSupervisor, fn ->
-      result =
-        if parallel do
-          Orchestrator.run(task, mode: mode, workspace: workspace, session_id: session_id)
-        else
-          {:ok, pid} =
-            MiniAgent.start_link(task,
-              session_id: session_id,
-              stream_callback: stream_callback,
-              mode: mode,
-              workspace: workspace
-            )
+    %Task{pid: task_pid} =
+      Task.Supervisor.async_nolink(MiniAgent.TaskSupervisor, fn ->
+        result =
+          if parallel do
+            Orchestrator.run(task, mode: mode, workspace: workspace, session_id: session_id)
+          else
+            {:ok, pid} =
+              MiniAgent.start_link(task,
+                session_id: session_id,
+                stream_callback: stream_callback,
+                mode: mode,
+                workspace: workspace
+              )
 
-          MiniAgent.run(pid)
-        end
+            MiniAgent.run(pid)
+          end
 
-      AgentBroadcaster.broadcast(session_id, %{
-        type: :done,
-        result: result,
-        timestamp: DateTime.utc_now()
-      })
-    end)
+        AgentBroadcaster.broadcast(session_id, %{
+          type: :done,
+          result: result,
+          timestamp: DateTime.utc_now()
+        })
+      end)
+
+    task_ref = Process.monitor(task_pid)
 
     socket =
       assign(socket,
         task: task,
+        session_id: session_id,
         status: :running,
         events: [],
-        output: ""
+        output: "",
+        task_ref: task_ref
       )
 
     {:noreply, socket}
@@ -267,9 +278,11 @@ defmodule MiniAgentWeb.AgentLive do
   def handle_info({:agent_event, %{type: :done, result: result}}, socket) do
     entry = %{icon: "done", color: "gray", label: "Done", time: format_time(DateTime.utc_now())}
 
+    if socket.assigns.task_ref, do: Process.demonitor(socket.assigns.task_ref, [:flush])
+
     {:noreply,
      socket
-     |> assign(output: result, status: :done)
+     |> assign(output: result, status: :done, task_ref: nil)
      |> update(:events, &[entry | &1])}
   end
 
@@ -344,7 +357,6 @@ defmodule MiniAgentWeb.AgentLive do
   end
 
   def handle_info({ref, _result}, socket) when is_reference(ref) do
-    Process.demonitor(ref, [:flush])
     {:noreply, socket}
   end
 
@@ -394,7 +406,7 @@ defmodule MiniAgentWeb.AgentLive do
 
         <%!-- Task input area --%>
         <div class="border-b border-gray-800 p-4 flex flex-col gap-3">
-          <form phx-submit="run" class="flex flex-col gap-2">
+          <form id="task-form" phx-submit="run" class="flex flex-col gap-2">
             <textarea
               name="task"
               rows="3"
