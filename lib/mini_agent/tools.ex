@@ -94,9 +94,13 @@ defmodule MiniAgent.Tools do
     result
   end
 
-  def execute("delegate", %{"task" => task}, %Context{mode: mode, workspace: ws} = ctx) do
+  def execute(
+        "delegate",
+        %{"task" => task},
+        %Context{mode: mode, workspace: ws, llm_module: llm} = ctx
+      ) do
     emit(:telemetry, "delegate", ctx.session_id)
-    MiniAgent.Orchestrator.run(task, mode: mode, workspace: ws)
+    MiniAgent.Orchestrator.run(task, mode: mode, workspace: ws, llm_module: llm)
   end
 
   def execute(name, _input, ctx) do

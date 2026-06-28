@@ -15,8 +15,9 @@ defmodule MiniAgent.Tools.Context do
   @type t :: %__MODULE__{
           mode: MiniAgent.Permission.mode(),
           workspace: String.t(),
-          session_id: String.t() | nil
+          session_id: String.t() | nil,
+          llm_module: module() | nil
         }
 
-  defstruct [:mode, :workspace, session_id: nil]
+  defstruct [:mode, :workspace, :llm_module, session_id: nil]
 end

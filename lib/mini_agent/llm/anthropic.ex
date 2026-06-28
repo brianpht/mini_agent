@@ -34,32 +34,29 @@ defmodule MiniAgent.LLM.Anthropic do
       |> maybe_put(:system, opts[:system])
       |> maybe_put(:tools, opts[:tools])
 
-    # Agent accumulates StreamParser state across chunks.
-    # The into: callback calls on_chunk directly (in the calling process),
-    # then updates the Agent with the new parser state.
-    # Agent is stopped in the after block to prevent leaks even if Req.post raises.
-    {:ok, agent} = Agent.start_link(fn -> StreamParser.new() end)
+    # ETS table accumulates StreamParser state across SSE chunks.
+    # Using ETS instead of Agent avoids spawning a GenServer per streaming call.
+    # The into: callback runs in the calling process so it can update the table
+    # directly. ETS is auto-cleaned if the owning process crashes.
+    tid = :ets.new(:anthropic_stream, [:set, :private])
+    :ets.insert(tid, {:parser, StreamParser.new()})
 
     result =
-      try do
-        Req.post(@url,
-          json: body,
-          headers: stream_headers(),
-          receive_timeout: 120_000,
-          into: fn {:data, data}, {req, resp} ->
-            chunks = Agent.get_and_update(agent, &collect_sse_chunks(data, &1))
-            Enum.each(chunks, on_chunk)
-            {:cont, {req, resp}}
-          end
-        )
-      rescue
-        e ->
-          Agent.stop(agent)
-          reraise e, __STACKTRACE__
-      end
+      Req.post(@url,
+        json: body,
+        headers: stream_headers(),
+        receive_timeout: 120_000,
+        into: fn {:data, data}, {req, resp} ->
+          [{:parser, parser}] = :ets.lookup(tid, :parser)
+          {chunks, new_parser} = collect_sse_chunks(data, parser)
+          :ets.insert(tid, {:parser, new_parser})
+          Enum.each(chunks, on_chunk)
+          {:cont, {req, resp}}
+        end
+      )
 
-    final = Agent.get(agent, & &1)
-    Agent.stop(agent)
+    [{:parser, final}] = :ets.lookup(tid, :parser)
+    :ets.delete(tid)
 
     case result do
       {:ok, %{status: 200}} -> {:ok, StreamParser.to_response(final)}
@@ -98,8 +95,8 @@ defmodule MiniAgent.LLM.Anthropic do
   # --- private ---
 
   # Parses all SSE lines in one data chunk.
-  # Returns {text_chunks, new_parser} for use with Agent.get_and_update.
-  # on_chunk is called from the into: callback (calling process), not from Agent process.
+  # Returns {text_chunks, new_parser}. Called from the Req :into callback
+  # (calling process) to update the ETS accumulator with new parser state.
   @spec collect_sse_chunks(String.t(), StreamParser.t()) :: {list(String.t()), StreamParser.t()}
   defp collect_sse_chunks(data, parser) do
     {final_parser, chunks_rev} =
@@ -124,7 +121,7 @@ defmodule MiniAgent.LLM.Anthropic do
   @spec headers() :: list({String.t(), String.t()})
   defp headers do
     [
-      {"x-api-key", System.fetch_env!("ANTHROPIC_API_KEY")},
+      {"x-api-key", api_key()},
       {"anthropic-version", "2023-06-01"},
       {"content-type", "application/json"}
     ]
@@ -133,11 +130,26 @@ defmodule MiniAgent.LLM.Anthropic do
   @spec stream_headers() :: list({String.t(), String.t()})
   defp stream_headers do
     [
-      {"x-api-key", System.fetch_env!("ANTHROPIC_API_KEY")},
+      {"x-api-key", api_key()},
       {"anthropic-version", "2023-06-01"},
       {"content-type", "application/json"},
       {"accept", "text/event-stream"}
     ]
+  end
+
+  # Read API key once, cache in :persistent_term for subsequent requests.
+  @spec api_key() :: String.t()
+  defp api_key do
+    key = {:mini_agent, :anthropic_api_key}
+
+    try do
+      :persistent_term.get(key)
+    rescue
+      ArgumentError ->
+        val = System.fetch_env!("ANTHROPIC_API_KEY")
+        :persistent_term.put(key, val)
+        val
+    end
   end
 
   @spec maybe_put(map(), atom(), term()) :: map()

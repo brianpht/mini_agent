@@ -27,6 +27,7 @@ defmodule MiniAgent.MixProject do
   defp deps do
     [
       {:req, "~> 0.5"},
+      {:finch, "~> 0.18"},
       {:jason, "~> 1.4"},
       {:telemetry, "~> 1.3"},
       {:phoenix, "~> 1.7"},

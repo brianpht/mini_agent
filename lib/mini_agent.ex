@@ -43,7 +43,8 @@ defmodule MiniAgent do
             mode: MiniAgent.Permission.mode(),
             workspace: String.t() | nil,
             stream_callback: (String.t() -> :ok) | nil,
-            autosave: boolean()
+            autosave: boolean(),
+            llm_module: module() | nil
           }
 
     defstruct [
@@ -54,6 +55,7 @@ defmodule MiniAgent do
       :budget,
       :workspace,
       :stream_callback,
+      :llm_module,
       messages: [],
       iterations: 0,
       done: false,
@@ -129,6 +131,7 @@ defmodule MiniAgent do
     state = %State{
       session_id: session_id,
       task: task,
+      llm_module: Application.fetch_env!(:mini_agent, :llm_module),
       budget: Budget.new(),
       mode: Keyword.get(opts, :mode, :ask),
       workspace:
@@ -212,7 +215,7 @@ defmodule MiniAgent do
   end
 
   defp perceive(%State{} = state) do
-    compressed = Memory.maybe_compress(state.messages, state.budget)
+    compressed = Memory.maybe_compress(state.messages, state.budget, state.llm_module)
     %{state | messages: compressed}
   end
 
@@ -222,7 +225,7 @@ defmodule MiniAgent do
   defp act(%State{done: true} = state), do: state
 
   defp act(%State{} = state) do
-    mod = llm_module()
+    mod = state.llm_module
     llm_opts = [system: @system_prompt, tools: Tools.definitions()]
 
     result =
@@ -270,7 +273,8 @@ defmodule MiniAgent do
     ctx = %Context{
       mode: state.mode,
       workspace: state.workspace || Application.get_env(:mini_agent, :workspace, File.cwd!()),
-      session_id: state.session_id
+      session_id: state.session_id,
+      llm_module: state.llm_module
     }
 
     results =
@@ -329,10 +333,10 @@ defmodule MiniAgent do
   @spec tick(State.t()) :: State.t()
   defp tick(state), do: %{state | iterations: state.iterations + 1}
 
-  @spec llm_module() :: module()
-  defp llm_module, do: Application.fetch_env!(:mini_agent, :llm_module)
-
   # Save a checkpoint after each completed iteration when autosave is enabled.
+  # Checkpoint.save involves JSON encode + small file write (~5-10 ms),
+  # well within acceptable GenServer blocking time for an I/O operation.
+  # The terminate/2 callback also saves synchronously before process exit.
   @spec maybe_checkpoint(State.t()) :: State.t()
   defp maybe_checkpoint(%State{autosave: true} = state) do
     sid = Checkpoint.save(state)

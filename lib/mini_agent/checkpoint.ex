@@ -103,6 +103,7 @@ defmodule MiniAgent.Checkpoint do
           limit: data["budget"]["limit"]
         },
         messages: restore_messages(data["messages"]),
+        llm_module: Application.fetch_env!(:mini_agent, :llm_module),
         tool_calls: [],
         last: nil,
         stream_callback: nil

@@ -109,7 +109,7 @@ defmodule MiniAgentWeb.AgentLive do
 
     %Task{pid: task_pid} =
       Task.Supervisor.async_nolink(MiniAgent.TaskSupervisor, fn ->
-        case MiniAgent.resume(sid, stream_callback: stream_callback, mode: mode) do
+        case MiniAgent.resume(sid, stream_callback: stream_callback, mode: mode, autosave: true) do
           {:ok, pid} ->
             result = MiniAgent.run(pid)
 
@@ -182,7 +182,8 @@ defmodule MiniAgentWeb.AgentLive do
                 session_id: session_id,
                 stream_callback: stream_callback,
                 mode: mode,
-                workspace: workspace
+                workspace: workspace,
+                autosave: true
               )
 
             MiniAgent.run(pid)

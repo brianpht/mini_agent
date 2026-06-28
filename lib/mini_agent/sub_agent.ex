@@ -32,16 +32,18 @@ defmodule MiniAgent.SubAgent do
           workspace: String.t(),
           id: term(),
           output: String.t() | nil,
-          done: boolean()
+          done: boolean(),
+          llm_module: module()
         }
 
   @doc """
   Run a sub-task to completion. Returns {:ok, output, tokens_used} | {:error, reason}.
 
   Options:
-    - :mode      - :auto | :readonly | :ask (default: :readonly)
-    - :workspace - sandbox root (default: Application.get_env :mini_agent, :workspace)
-    - :id        - identifier for logging (default: "?")
+    - :mode       - :auto | :readonly | :ask (default: :readonly)
+    - :workspace  - sandbox root (default: Application.get_env :mini_agent, :workspace)
+    - :id         - identifier for logging (default: "?")
+    - :llm_module - LLM implementation module (default: from Application env)
   """
   @spec run(String.t(), keyword()) ::
           {:ok, String.t(), non_neg_integer()} | {:error, String.t()}
@@ -53,6 +55,11 @@ defmodule MiniAgent.SubAgent do
 
     id = Keyword.get(opts, :id, "?")
 
+    llm_module =
+      Keyword.get_lazy(opts, :llm_module, fn ->
+        Application.fetch_env!(:mini_agent, :llm_module)
+      end)
+
     state = %{
       messages: [%{"role" => "user", "content" => subtask}],
       iter: 0,
@@ -61,7 +68,8 @@ defmodule MiniAgent.SubAgent do
       workspace: workspace,
       id: id,
       output: nil,
-      done: false
+      done: false,
+      llm_module: llm_module
     }
 
     final = loop(state)
@@ -94,7 +102,7 @@ defmodule MiniAgent.SubAgent do
 
   @spec step(sub_state()) :: sub_state()
   defp step(s) do
-    mod = llm_module()
+    mod = s.llm_module
 
     case Retry.with_retry(fn ->
            mod.chat(s.messages, system: @system_prompt, tools: Tools.safe_definitions())
@@ -108,7 +116,7 @@ defmodule MiniAgent.SubAgent do
 
         cond do
           calls != [] ->
-            ctx = %Context{mode: s.mode, workspace: s.workspace}
+            ctx = %Context{mode: s.mode, workspace: s.workspace, llm_module: s.llm_module}
             results = execute_tools(calls, ctx, s.iter)
             tool_msg = %{"role" => "user", "content" => results}
             %{s | messages: s.messages ++ [tool_msg]}
@@ -157,7 +165,4 @@ defmodule MiniAgent.SubAgent do
       results
     end
   end
-
-  @spec llm_module() :: module()
-  defp llm_module, do: Application.fetch_env!(:mini_agent, :llm_module)
 end

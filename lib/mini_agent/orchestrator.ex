@@ -37,20 +37,31 @@ defmodule MiniAgent.Orchestrator do
 
   @plan_system "You are a task planner. Output only a plain list of independent sub-tasks, one per line, no numbering, no explanation, no extra text."
   @synthesize_system "You are a results synthesizer. Combine findings from multiple sub-agents into one clear, complete answer."
+  # Timeout for Task.yield_many/2 in run_parallel.
+  # Worst case per sub-agent: @max_iter(8) * (LLM response ~30 s + retry backoff ~7 s) = ~296 s.
+  # 300 s provides a safe margin for real API calls.
+  @yield_timeout_ms 300_000
 
   @doc """
   Run a task using the orchestrator pattern.
   Returns the synthesized result string.
 
   Options:
-    - :mode      - :auto | :readonly | :ask (default: :readonly).
-                   :ask is downgraded to :readonly - see module doc.
-    - :workspace - sandbox root passed to sub-agents (default: Application env).
+    - :mode       - :auto | :readonly | :ask (default: :readonly).
+                    :ask is downgraded to :readonly - see module doc.
+    - :workspace  - sandbox root passed to sub-agents (default: Application env).
+    - :llm_module - LLM implementation module (default: from Application env).
+    - :session_id - session ID for telemetry routing.
   """
   @spec run(String.t(), keyword()) :: String.t()
   def run(task, opts \\ []) do
     raw_mode = Keyword.get(opts, :mode, :readonly)
     session_id = Keyword.get(opts, :session_id)
+
+    llm_module =
+      Keyword.get_lazy(opts, :llm_module, fn ->
+        Application.fetch_env!(:mini_agent, :llm_module)
+      end)
 
     # :ask spawns interactive stdin prompts; N concurrent Tasks would race on
     # the single stdin fd. Downgrade to :readonly so sub-agents can still read
@@ -77,7 +88,7 @@ defmodule MiniAgent.Orchestrator do
       %{task: task, session_id: session_id}
     )
 
-    {subtasks, plan_tokens} = plan(task)
+    {subtasks, plan_tokens} = plan(task, llm_module)
 
     :telemetry.execute(
       [:mini_agent, :orchestrator, :planned],
@@ -85,7 +96,7 @@ defmodule MiniAgent.Orchestrator do
       %{session_id: session_id}
     )
 
-    results = run_parallel(subtasks, mode, workspace, session_id)
+    results = run_parallel(subtasks, mode, workspace, session_id, llm_module)
 
     sub_tokens = results |> Enum.map(&elem(&1, 3)) |> Enum.sum()
 
@@ -95,7 +106,7 @@ defmodule MiniAgent.Orchestrator do
       %{subtask_count: length(results), session_id: session_id}
     )
 
-    {final_text, synth_tokens} = synthesize(task, results)
+    {final_text, synth_tokens} = synthesize(task, results, llm_module)
 
     grand_total = plan_tokens + sub_tokens + synth_tokens
 
@@ -115,8 +126,8 @@ defmodule MiniAgent.Orchestrator do
 
   # --- plan ---
 
-  @spec plan(String.t()) :: {list(String.t()), non_neg_integer()}
-  defp plan(task) do
+  @spec plan(String.t(), module()) :: {list(String.t()), non_neg_integer()}
+  defp plan(task, llm_module) do
     prompt = [
       %{
         "role" => "user",
@@ -127,13 +138,13 @@ defmodule MiniAgent.Orchestrator do
       }
     ]
 
-    case Retry.with_retry(fn -> llm_module().chat(prompt, system: @plan_system) end) do
+    case Retry.with_retry(fn -> llm_module.chat(prompt, system: @plan_system) end) do
       {:ok, resp} ->
-        tokens = llm_module().usage(resp)
+        tokens = llm_module.usage(resp)
 
         subtasks =
           resp
-          |> llm_module().extract_text()
+          |> llm_module.extract_text()
           |> String.split("\n", trim: true)
           |> Enum.map(&strip_list_prefix/1)
           |> Enum.reject(&(&1 == ""))
@@ -165,25 +176,24 @@ defmodule MiniAgent.Orchestrator do
           list(String.t()),
           MiniAgent.Permission.mode(),
           String.t(),
-          String.t() | nil
+          String.t() | nil,
+          module()
         ) ::
           list({non_neg_integer(), String.t(), String.t(), non_neg_integer()})
-  defp run_parallel(subtasks, mode, workspace, session_id) do
+  defp run_parallel(subtasks, mode, workspace, session_id, llm_module) do
     indexed = Enum.with_index(subtasks, 1)
 
     # async_nolink: a single sub-agent crash does not kill the orchestrator
     tasks =
       Enum.map(indexed, fn {subtask, idx} ->
         Task.Supervisor.async_nolink(MiniAgent.TaskSupervisor, fn ->
-          run_sub_agent(subtask, idx, mode, workspace, session_id)
+          run_sub_agent(subtask, idx, mode, workspace, session_id, llm_module)
         end)
       end)
 
-    # yield_many timeout: 120 s.
-    # Worst case per sub-agent: @max_iter(8) * LLM.Retry max backoff(7 s) = 56 s.
-    # 120 s > 56 s, so the timeout safely covers full retry accumulation.
+    # yield_many with generous timeout to cover LLM response time + retry backoff.
     tasks
-    |> Task.yield_many(120_000)
+    |> Task.yield_many(@yield_timeout_ms)
     |> Enum.zip(indexed)
     |> Enum.map(fn {{task, outcome}, {subtask, idx}} ->
       case outcome do
@@ -207,10 +217,11 @@ defmodule MiniAgent.Orchestrator do
           non_neg_integer(),
           MiniAgent.Permission.mode(),
           String.t(),
-          String.t() | nil
+          String.t() | nil,
+          module()
         ) ::
           {non_neg_integer(), String.t(), String.t(), non_neg_integer()}
-  defp run_sub_agent(subtask, idx, mode, workspace, session_id) do
+  defp run_sub_agent(subtask, idx, mode, workspace, session_id, llm_module) do
     :telemetry.execute(
       [:mini_agent, :orchestrator, :sub_agent_start],
       %{},
@@ -218,7 +229,12 @@ defmodule MiniAgent.Orchestrator do
     )
 
     {tokens, result} =
-      case SubAgent.run(subtask, mode: mode, workspace: workspace, id: idx) do
+      case SubAgent.run(subtask,
+             mode: mode,
+             workspace: workspace,
+             id: idx,
+             llm_module: llm_module
+           ) do
         {:ok, output, n} -> {n, output}
         {:error, reason} -> {0, "Error: #{reason}"}
       end
@@ -236,10 +252,11 @@ defmodule MiniAgent.Orchestrator do
 
   @spec synthesize(
           String.t(),
-          list({non_neg_integer(), String.t(), String.t(), non_neg_integer()})
+          list({non_neg_integer(), String.t(), String.t(), non_neg_integer()}),
+          module()
         ) ::
           {String.t(), non_neg_integer()}
-  defp synthesize(task, results) do
+  defp synthesize(task, results, llm_module) do
     findings =
       Enum.map_join(results, "\n\n", fn {idx, subtask, output, _tokens} ->
         "### Sub-agent #{idx}: #{subtask}\n#{output}"
@@ -255,16 +272,13 @@ defmodule MiniAgent.Orchestrator do
       }
     ]
 
-    case Retry.with_retry(fn -> llm_module().chat(prompt, system: @synthesize_system) end) do
+    case Retry.with_retry(fn -> llm_module.chat(prompt, system: @synthesize_system) end) do
       {:ok, resp} ->
-        tokens = llm_module().usage(resp)
-        {llm_module().extract_text(resp), tokens}
+        tokens = llm_module.usage(resp)
+        {llm_module.extract_text(resp), tokens}
 
       {:error, reason} ->
         {"Synthesis failed (#{reason}). Raw results:\n\n#{findings}", 0}
     end
   end
-
-  @spec llm_module() :: module()
-  defp llm_module, do: Application.fetch_env!(:mini_agent, :llm_module)
 end

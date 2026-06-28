@@ -2,12 +2,13 @@ defmodule MiniAgent.LLM.Error do
   @moduledoc false
 
   @typedoc "Structured LLM error type. Used in place of raw strings for pattern matching."
-  @type t :: :rate_limited
-           | :service_unavailable
-           | :timeout
-           | :network_error
-           | :http_error
-           | :unknown
+  @type t ::
+          :rate_limited
+          | :service_unavailable
+          | :timeout
+          | :network_error
+          | :http_error
+          | :unknown
 
   @doc "True if this error type is transient and worth retrying."
   @spec retryable?(t()) :: boolean()

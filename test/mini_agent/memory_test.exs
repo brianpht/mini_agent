@@ -4,6 +4,7 @@ defmodule MiniAgent.MemoryTest do
   alias MiniAgent.{Budget, Memory}
 
   @threshold Application.compile_env!(:mini_agent, :compress_token_threshold)
+  @mock_llm Application.compile_env!(:mini_agent, :llm_module)
 
   defp under_threshold, do: %Budget{used: @threshold - 1, limit: 50_000}
   defp over_threshold, do: %Budget{used: @threshold + 1, limit: 50_000}
@@ -15,25 +16,25 @@ defmodule MiniAgent.MemoryTest do
     end)
   end
 
-  describe "maybe_compress/2 - no compression path" do
+  describe "maybe_compress/3 - no compression path" do
     test "returns messages unchanged when under token threshold" do
       msgs = make_messages(10)
-      assert Memory.maybe_compress(msgs, under_threshold()) == msgs
+      assert Memory.maybe_compress(msgs, under_threshold(), @mock_llm) == msgs
     end
 
     test "returns messages unchanged when too few messages even if over threshold" do
       msgs = make_messages(3)
-      assert Memory.maybe_compress(msgs, over_threshold()) == msgs
+      assert Memory.maybe_compress(msgs, over_threshold(), @mock_llm) == msgs
     end
 
     test "returns messages unchanged at exact keep_recent boundary" do
       # 5 messages = keep_recent(4) + 1 - no compression
       msgs = make_messages(5)
-      assert Memory.maybe_compress(msgs, over_threshold()) == msgs
+      assert Memory.maybe_compress(msgs, over_threshold(), @mock_llm) == msgs
     end
   end
 
-  describe "maybe_compress/2 - compression path" do
+  describe "maybe_compress/3 - compression path" do
     # These tests trigger the LLM mock via @llm_module (MiniAgent.MockLLM in test env).
     # We need the TaskSupervisor running (started by MiniAgent.Application).
 
@@ -57,19 +58,19 @@ defmodule MiniAgent.MemoryTest do
 
     test "returns fewer messages after compression" do
       msgs = make_messages(10)
-      result = Memory.maybe_compress(msgs, over_threshold())
+      result = Memory.maybe_compress(msgs, over_threshold(), @mock_llm)
       assert length(result) < length(msgs)
     end
 
     test "never returns empty list" do
       msgs = make_messages(10)
-      result = Memory.maybe_compress(msgs, over_threshold())
+      result = Memory.maybe_compress(msgs, over_threshold(), @mock_llm)
       assert result != []
     end
 
     test "result starts with a summary message" do
       msgs = make_messages(10)
-      [first | _] = Memory.maybe_compress(msgs, over_threshold())
+      [first | _] = Memory.maybe_compress(msgs, over_threshold(), @mock_llm)
       assert first["role"] == "user"
       assert String.starts_with?(first["content"], "[CONTEXT SUMMARY]")
     end
@@ -105,7 +106,7 @@ defmodule MiniAgent.MemoryTest do
         plain.(10)
       ]
 
-      result = Memory.maybe_compress(msgs, over_threshold())
+      result = Memory.maybe_compress(msgs, over_threshold(), @mock_llm)
 
       # The first message of recent must NOT be a tool_result
       [_summary | recent] = result
@@ -140,7 +141,7 @@ defmodule MiniAgent.MemoryTest do
           tool_pair.("b") ++
           [%{"role" => "assistant", "content" => "thinking"}]
 
-      result = Memory.maybe_compress(msgs, over_threshold())
+      result = Memory.maybe_compress(msgs, over_threshold(), @mock_llm)
       # Compression skipped - messages returned unchanged
       assert result == msgs
     end

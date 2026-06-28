@@ -29,19 +29,19 @@ defmodule MiniAgent.Memory do
   Compress messages when token budget exceeds threshold.
   Returns messages unchanged if below threshold or too few to compress.
   """
-  @spec maybe_compress(messages(), Budget.t()) :: messages()
-  def maybe_compress(messages, %Budget{used: used}) when used < @threshold, do: messages
+  @spec maybe_compress(messages(), Budget.t(), module()) :: messages()
+  def maybe_compress(messages, %Budget{used: used}, _llm_mod) when used < @threshold, do: messages
 
-  def maybe_compress(messages, _budget) when length(messages) <= @keep_recent + 1 do
+  def maybe_compress(messages, _budget, _llm_mod) when length(messages) <= @keep_recent + 1 do
     messages
   end
 
-  def maybe_compress(messages, _budget) do
-    compress(messages)
+  def maybe_compress(messages, _budget, llm_mod) do
+    compress(messages, llm_mod)
   end
 
-  @spec compress(messages()) :: messages()
-  defp compress(messages) do
+  @spec compress(messages(), module()) :: messages()
+  defp compress(messages, llm_mod) do
     initial_split = length(messages) - @keep_recent
     split_at = safe_split_at(messages, initial_split)
 
@@ -51,7 +51,7 @@ defmodule MiniAgent.Memory do
     else
       {old, recent} = Enum.split(messages, split_at)
 
-      summary = summarize_async(old)
+      summary = summarize_async(old, llm_mod)
       before_count = length(messages)
       after_count = length(recent) + 1
 
@@ -87,11 +87,11 @@ defmodule MiniAgent.Memory do
   defp orphaned_tool_result?(%{"content" => [%{"type" => "tool_result"} | _]}), do: true
   defp orphaned_tool_result?(_), do: false
 
-  @spec summarize_async(messages()) :: String.t()
-  defp summarize_async(messages) do
+  @spec summarize_async(messages(), module()) :: String.t()
+  defp summarize_async(messages, llm_mod) do
     task =
       Task.Supervisor.async_nolink(MiniAgent.TaskSupervisor, fn ->
-        do_summarize(messages)
+        do_summarize(messages, llm_mod)
       end)
 
     case Task.yield(task, @summarize_timeout_ms) || Task.shutdown(task) do
@@ -101,8 +101,8 @@ defmodule MiniAgent.Memory do
     end
   end
 
-  @spec do_summarize(messages()) :: String.t()
-  defp do_summarize(messages) do
+  @spec do_summarize(messages(), module()) :: String.t()
+  defp do_summarize(messages, llm_mod) do
     transcript =
       Enum.map_join(messages, "\n", fn m ->
         role = m["role"] || m[:role] || "unknown"
@@ -121,17 +121,14 @@ defmodule MiniAgent.Memory do
 
     result =
       Retry.with_retry(fn ->
-        llm_module().chat(prompt, system: "You are a context compressor. Be concise.")
+        llm_mod.chat(prompt, system: "You are a context compressor. Be concise.")
       end)
 
     case result do
-      {:ok, resp} -> llm_module().extract_text(resp)
+      {:ok, resp} -> llm_mod.extract_text(resp)
       {:error, _} -> "(compression failed, context partially dropped)"
     end
   end
-
-  @spec llm_module() :: module()
-  defp llm_module, do: Application.fetch_env!(:mini_agent, :llm_module)
 
   @spec stringify_content(term()) :: String.t()
   defp stringify_content(c) when is_binary(c), do: c

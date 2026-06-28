@@ -8,8 +8,8 @@ defmodule MiniAgent.LLM.DeepSeek do
 
   Streaming: chat_stream/3 uses real token-by-token SSE streaming via the OpenAI
   streaming format (stream: true, data: [DONE] terminator). Parsed by
-  MiniAgent.LLM.DeepSeekStreamParser. The Agent accumulator pattern is used to
-  carry parser state across Req :into callbacks.
+  MiniAgent.LLM.DeepSeekStreamParser. An ETS table carries parser state across
+  Req :into callbacks.
 
   Required env var: DEEPSEEK_API_KEY
   """
@@ -51,31 +51,29 @@ defmodule MiniAgent.LLM.DeepSeek do
       %{model: @model, max_tokens: @max_tokens, messages: oai_messages, stream: true}
       |> maybe_put(:tools, oai_tools)
 
-    # Agent accumulates DeepSeekStreamParser state across SSE chunks.
-    # on_chunk is called in the into: callback (calling process), not in Agent process.
-    # rescue/reraise ensures Agent is always stopped even if Req.post raises.
-    {:ok, agent} = Agent.start_link(fn -> DeepSeekStreamParser.new() end)
+    # ETS table accumulates DeepSeekStreamParser state across SSE chunks.
+    # Using ETS instead of Agent avoids spawning a GenServer per streaming call.
+    # on_chunk is called in the into: callback (calling process), not from a
+    # separate process. ETS is auto-cleaned if the owning process crashes.
+    tid = :ets.new(:deepseek_stream, [:set, :private])
+    :ets.insert(tid, {:parser, DeepSeekStreamParser.new()})
 
     result =
-      try do
-        Req.post(@url,
-          json: body,
-          headers: stream_headers(),
-          receive_timeout: 120_000,
-          into: fn {:data, data}, {req, resp} ->
-            chunks = Agent.get_and_update(agent, &collect_sse_chunks(data, &1))
-            Enum.each(chunks, on_chunk)
-            {:cont, {req, resp}}
-          end
-        )
-      rescue
-        e ->
-          Agent.stop(agent)
-          reraise e, __STACKTRACE__
-      end
+      Req.post(@url,
+        json: body,
+        headers: stream_headers(),
+        receive_timeout: 120_000,
+        into: fn {:data, data}, {req, resp} ->
+          [{:parser, parser}] = :ets.lookup(tid, :parser)
+          {chunks, new_parser} = collect_sse_chunks(data, parser)
+          :ets.insert(tid, {:parser, new_parser})
+          Enum.each(chunks, on_chunk)
+          {:cont, {req, resp}}
+        end
+      )
 
-    final = Agent.get(agent, & &1)
-    Agent.stop(agent)
+    [{:parser, final}] = :ets.lookup(tid, :parser)
+    :ets.delete(tid)
 
     case result do
       {:ok, %{status: 200}} -> {:ok, DeepSeekStreamParser.to_response(final)}
@@ -267,8 +265,8 @@ defmodule MiniAgent.LLM.DeepSeek do
   # ---------------------------------------------------------------------------
 
   # Parses all SSE lines in one data chunk.
-  # Returns {text_chunks, new_parser} for use with Agent.get_and_update.
-  # on_chunk is called from the into: callback (calling process), not from Agent.
+  # Returns {text_chunks, new_parser}. Called from the Req :into callback
+  # (calling process) to update the ETS accumulator with new parser state.
   @spec collect_sse_chunks(String.t(), DeepSeekStreamParser.t()) ::
           {list(String.t()), DeepSeekStreamParser.t()}
   defp collect_sse_chunks(data, parser) do
@@ -293,7 +291,7 @@ defmodule MiniAgent.LLM.DeepSeek do
   @spec headers() :: list({String.t(), String.t()})
   defp headers do
     [
-      {"authorization", "Bearer #{System.fetch_env!("DEEPSEEK_API_KEY")}"},
+      {"authorization", "Bearer #{api_key()}"},
       {"content-type", "application/json"}
     ]
   end
@@ -301,10 +299,25 @@ defmodule MiniAgent.LLM.DeepSeek do
   @spec stream_headers() :: list({String.t(), String.t()})
   defp stream_headers do
     [
-      {"authorization", "Bearer #{System.fetch_env!("DEEPSEEK_API_KEY")}"},
+      {"authorization", "Bearer #{api_key()}"},
       {"content-type", "application/json"},
       {"accept", "text/event-stream"}
     ]
+  end
+
+  # Read API key once, cache in :persistent_term for subsequent requests.
+  @spec api_key() :: String.t()
+  defp api_key do
+    key = {:mini_agent, :deepseek_api_key}
+
+    try do
+      :persistent_term.get(key)
+    rescue
+      ArgumentError ->
+        val = System.fetch_env!("DEEPSEEK_API_KEY")
+        :persistent_term.put(key, val)
+        val
+    end
   end
 
   @spec maybe_put(map(), term(), term()) :: map()
