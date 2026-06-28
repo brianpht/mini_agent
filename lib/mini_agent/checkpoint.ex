@@ -89,11 +89,13 @@ defmodule MiniAgent.Checkpoint do
   def load(session_id) do
     with {:ok, json} <- File.read(checkpoint_path(session_id)),
          {:ok, data} <- Jason.decode(json),
-         :ok <- check_version(data) do
+         :ok <- check_version(data),
+         {:ok, mode} <- parse_mode(data["mode"]),
+         {:ok, messages} <- restore_messages(data["messages"]) do
       state = %MiniAgent.State{
         session_id: data["session_id"],
         task: data["task"],
-        mode: String.to_existing_atom(data["mode"]),
+        mode: mode,
         workspace: data["workspace"] || Application.get_env(:mini_agent, :workspace, File.cwd!()),
         iterations: data["iterations"],
         done: data["done"],
@@ -102,7 +104,7 @@ defmodule MiniAgent.Checkpoint do
           used: data["budget"]["used"],
           limit: data["budget"]["limit"]
         },
-        messages: restore_messages(data["messages"]),
+        messages: messages,
         llm_module: Application.fetch_env!(:mini_agent, :llm_module),
         tool_calls: [],
         last: nil,
@@ -112,11 +114,19 @@ defmodule MiniAgent.Checkpoint do
       {:ok, state}
     else
       {:error, :enoent} -> {:error, "session not found: #{session_id}"}
+      {:error, reason} when is_binary(reason) -> {:error, reason}
       {:error, reason} when is_atom(reason) -> {:error, "file error: #{reason}"}
       {:error, %Jason.DecodeError{} = e} -> {:error, "JSON decode error: #{Exception.message(e)}"}
-      {:error, reason} -> {:error, "load error: #{inspect(reason)}"}
     end
   end
+
+  # Parse the persisted mode string into a known atom. Avoids String.to_existing_atom
+  # raising on a corrupt or hand-edited checkpoint.
+  @spec parse_mode(term()) :: {:ok, MiniAgent.Permission.mode()} | {:error, String.t()}
+  defp parse_mode("auto"), do: {:ok, :auto}
+  defp parse_mode("ask"), do: {:ok, :ask}
+  defp parse_mode("readonly"), do: {:ok, :readonly}
+  defp parse_mode(other), do: {:error, "invalid mode in checkpoint: #{inspect(other)}"}
 
   @doc "List saved sessions, most recently saved first."
   @spec list() :: list(summary())
@@ -204,12 +214,26 @@ defmodule MiniAgent.Checkpoint do
   defp stringify_keys(val), do: val
 
   # Restore messages keeping string keys - the LLM module already expects them.
-  @spec restore_messages(list(map())) :: list(map())
-  defp restore_messages(messages) do
-    Enum.map(messages, fn msg ->
-      %{"role" => msg["role"], "content" => msg["content"]}
-    end)
+  # Rejects the whole checkpoint if any message is missing a role or has nil
+  # content, rather than silently feeding malformed turns to the LLM.
+  @spec restore_messages(term()) :: {:ok, list(map())} | {:error, String.t()}
+  defp restore_messages(messages) when is_list(messages) do
+    if Enum.all?(messages, &valid_message?/1) do
+      {:ok,
+       Enum.map(messages, fn msg -> %{"role" => msg["role"], "content" => msg["content"]} end)}
+    else
+      {:error, "checkpoint contains malformed messages (missing role or content)"}
+    end
   end
+
+  defp restore_messages(_), do: {:error, "checkpoint messages field is not a list"}
+
+  @spec valid_message?(term()) :: boolean()
+  defp valid_message?(%{"role" => role, "content" => content})
+       when is_binary(role) and not is_nil(content),
+       do: true
+
+  defp valid_message?(_), do: false
 
   @spec append_history(session_id(), non_neg_integer()) :: :ok
   defp append_history(session_id, iterations) do

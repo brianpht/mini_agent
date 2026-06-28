@@ -5,7 +5,14 @@ defmodule MiniAgent.Tools.FileTool do
   The workspace root is passed explicitly by the caller (read once at the agent
   boundary) so that concurrent sub-agents can never interfere via a shared
   Application env key.
+
+  Path confinement is delegated to `MiniAgent.Tools.Sandbox`, which expands
+  relative paths against the workspace and follows symlinks before checking the
+  boundary. The canonical path returned by the sandbox is the one handed to the
+  filesystem, so the value validated is exactly the value used.
   """
+
+  alias MiniAgent.Tools.Sandbox
 
   @max_read_bytes 4_000
 
@@ -14,8 +21,8 @@ defmodule MiniAgent.Tools.FileTool do
   def read_file(%{"path" => path} = input, workspace) do
     offset = max(0, Map.get(input, "offset", 0))
 
-    with :ok <- check_path(path, workspace),
-         {:ok, content} <- File.read(path) do
+    with {:ok, safe} <- Sandbox.confine(path, workspace),
+         {:ok, content} <- File.read(safe) do
       size = byte_size(content)
       start = min(offset, size)
       len = min(@max_read_bytes, size - start)
@@ -39,8 +46,8 @@ defmodule MiniAgent.Tools.FileTool do
   @doc "List files in directory."
   @spec list_dir(map(), String.t()) :: String.t()
   def list_dir(%{"path" => path}, workspace) do
-    with :ok <- check_path(path, workspace),
-         {:ok, files} <- File.ls(path) do
+    with {:ok, safe} <- Sandbox.confine(path, workspace),
+         {:ok, files} <- File.ls(safe) do
       Enum.join(files, "\n")
     else
       {:error, :outside_workspace} -> "Error: path outside workspace"
@@ -53,9 +60,9 @@ defmodule MiniAgent.Tools.FileTool do
   @doc "Write content to file."
   @spec write_file(map(), String.t()) :: String.t()
   def write_file(%{"path" => path, "content" => content}, workspace) do
-    with :ok <- check_path(path, workspace),
-         :ok <- File.write(path, content) do
-      "Wrote #{byte_size(content)} bytes to #{path}"
+    with {:ok, safe} <- Sandbox.confine(path, workspace),
+         :ok <- File.write(safe, content) do
+      "Wrote #{byte_size(content)} bytes to #{safe}"
     else
       {:error, :outside_workspace} -> "Error: path outside workspace"
       {:error, reason} -> "Error writing file: #{reason}"
@@ -64,15 +71,4 @@ defmodule MiniAgent.Tools.FileTool do
 
   def write_file(_input, _workspace),
     do: "Error: missing required parameters 'path' and/or 'content'"
-
-  @spec check_path(String.t(), String.t()) :: :ok | {:error, :outside_workspace}
-  defp check_path(path, workspace) do
-    expanded = Path.expand(path)
-
-    if String.starts_with?(expanded, workspace) do
-      :ok
-    else
-      {:error, :outside_workspace}
-    end
-  end
 end

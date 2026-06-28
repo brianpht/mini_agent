@@ -11,7 +11,18 @@ defmodule MiniAgent.Tools.ShellTool do
       config :mini_agent, :shell_whitelist, ~w[ls cat grep ...]
 
   Falls back to @default_whitelist at compile time if no config is present.
+
+  Commands run with `cd: workspace` and via `System.cmd/3` (no shell is spawned,
+  so there is no shell-metacharacter injection). Arguments are additionally
+  confined to the workspace via `MiniAgent.Tools.Sandbox` so a path argument
+  cannot escape (e.g. `cat ../../etc/passwd`).
+
+  Limitation: the command string is split on whitespace, so quoted arguments
+  containing spaces are not preserved. Callers needing complex quoting should be
+  redesigned around structured tool inputs rather than a shell string.
   """
+
+  alias MiniAgent.Tools.Sandbox
 
   @default_whitelist ~w[ls cat grep find wc head tail echo mix git rg fd bat]
   @max_output_bytes 4_000
@@ -27,11 +38,16 @@ defmodule MiniAgent.Tools.ShellTool do
         "Error: empty command"
 
       [bin | args] ->
-        if MapSet.member?(allowed_set, bin) do
-          execute(bin, args, workspace)
-        else
-          allowed_str = whitelist |> Enum.sort() |> Enum.join(", ")
-          "Error: '#{bin}' not in whitelist: #{allowed_str}"
+        cond do
+          not MapSet.member?(allowed_set, bin) ->
+            allowed_str = whitelist |> Enum.sort() |> Enum.join(", ")
+            "Error: '#{bin}' not in whitelist: #{allowed_str}"
+
+          Enum.any?(args, &Sandbox.arg_escapes?(&1, workspace)) ->
+            "Error: argument path outside workspace"
+
+          true ->
+            execute(bin, args, workspace)
         end
     end
   end

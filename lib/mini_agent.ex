@@ -277,19 +277,7 @@ defmodule MiniAgent do
       llm_module: state.llm_module
     }
 
-    results =
-      Enum.map(calls, fn call ->
-        tool_name = call["name"]
-        tool_input = call["input"]
-
-        output =
-          case Permission.check(tool_name, tool_input, state.mode) do
-            :allow -> Tools.execute(tool_name, tool_input, ctx)
-            {:deny, reason} -> "Denied: #{reason}"
-          end
-
-        %{"type" => "tool_result", "tool_use_id" => call["id"], "content" => output}
-      end)
+    results = Enum.map(calls, &run_tool_call(&1, ctx, state.mode))
 
     # From iteration 2 onwards, append a nudge text block in the same user turn.
     # Valid for Anthropic (mixed content user turn) and DeepSeek (see convert_message).
@@ -327,6 +315,31 @@ defmodule MiniAgent do
   end
 
   defp observe(state), do: state
+
+  # Execute a single tool call, guarding against a malformed LLM response that
+  # omits the tool name or id (which would otherwise propagate nil downstream
+  # and break the Anthropic tool_use/tool_result pairing contract).
+  @spec run_tool_call(map(), Context.t(), Permission.mode()) :: map()
+  defp run_tool_call(%{"name" => name, "id" => id} = call, ctx, mode)
+       when is_binary(name) and is_binary(id) do
+    input = call["input"] || %{}
+
+    output =
+      case Permission.check(name, input, mode) do
+        :allow -> Tools.execute(name, input, ctx)
+        {:deny, reason} -> "Denied: #{reason}"
+      end
+
+    %{"type" => "tool_result", "tool_use_id" => id, "content" => output}
+  end
+
+  defp run_tool_call(call, _ctx, _mode) do
+    %{
+      "type" => "tool_result",
+      "tool_use_id" => call["id"] || "unknown",
+      "content" => "Error: malformed tool call (missing name or id)"
+    }
+  end
 
   # --- tick ---
 

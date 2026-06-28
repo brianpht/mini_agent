@@ -76,8 +76,18 @@ defmodule MiniAgent.CLI do
   @spec apply_workspace_override(keyword()) :: :ok
   defp apply_workspace_override(opts) do
     case opts[:workspace] do
-      nil -> :ok
-      path -> Application.put_env(:mini_agent, :workspace, Path.expand(path))
+      nil ->
+        :ok
+
+      path ->
+        expanded = Path.expand(path)
+
+        if File.dir?(expanded) do
+          Application.put_env(:mini_agent, :workspace, expanded)
+        else
+          IO.puts("Error: workspace is not an existing directory: #{expanded}")
+          System.halt(1)
+        end
     end
   end
 
@@ -94,21 +104,11 @@ defmodule MiniAgent.CLI do
 
   @spec run_orchestrator(String.t(), MiniAgent.Permission.mode()) :: :ok
   defp run_orchestrator(task, mode) do
-    effective_mode =
-      if mode == :ask do
-        IO.puts(
-          "Note: --parallel does not support :ask mode (concurrent Tasks cannot share stdin).\n" <>
-            "      Downgrading to :readonly. Use --mode auto to permit all tools without prompts."
-        )
-
-        :readonly
-      else
-        mode
-      end
-
+    # Orchestrator.run/2 downgrades :ask -> :readonly itself and emits the
+    # [:mini_agent, :orchestrator, :ask_downgraded] event, which Telemetry logs.
     workspace = Application.get_env(:mini_agent, :workspace, File.cwd!())
     IO.puts("Orchestrator mode: decomposing into sub-agents...\n")
-    output = MiniAgent.Orchestrator.run(task, mode: effective_mode, workspace: workspace)
+    output = MiniAgent.Orchestrator.run(task, mode: mode, workspace: workspace)
     IO.puts("\nDONE\n#{output}")
     :ok
   end

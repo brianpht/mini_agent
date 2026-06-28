@@ -2,39 +2,6 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## LLM Behavioral Contract
-
-This section overrides generic LLM behavior. These rules are mandatory.s
-
-Before modifying any code:
-
-1. Identify whether the change touches hot-path code.
-2. Identify affected modules and list them explicitly.
-3. Inspect surrounding modules before proposing changes.
-4. Confirm the change respects:
-   - Hot path rules
-   - Concurrency rules
-   - Telemetry/logging rules
-   - Determinism rules
-5. Prefer minimal, localized changes.
-6. Prefer extension over modification.
-7. If any assumption is required, state it explicitly.
-8. If uncertain, ask for clarification instead of guessing.
-
-After generating code:
-
-1. Re-check typespec correctness.
-2. Re-check dialyzer compatibility.
-3. Re-check for hot-path violations.
-4. Ensure CI steps would pass.
-5. Ensure no forbidden patterns are introduced.
-
-Never:
-- Introduce architectural drift.
-- Modify unrelated modules.
-- Add blocking calls in hot path.
-- Bypass telemetry boundary.
-
 ## Build, test, and lint commands
 
 ```bash

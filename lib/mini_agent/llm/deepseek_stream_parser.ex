@@ -27,15 +27,17 @@ defmodule MiniAgent.LLM.DeepSeekStreamParser do
   agent loop and extract_text/extract_tool_calls can be reused unchanged.
   """
 
-  # tool_slots: %{integer() => %{id, name, args_acc :: String.t()}}
-  defstruct text: "",
+  # tool_slots: %{integer() => %{id, name, args_acc :: iodata()}}
+  # text and per-slot args_acc accumulate as IO lists (O(1) appends) and are
+  # flattened to binaries once in to_response/1, avoiding quadratic rebuilding.
+  defstruct text: [],
             tool_slots: %{},
             input_tokens: 0,
             output_tokens: 0,
             stop_reason: nil
 
   @type t :: %__MODULE__{
-          text: String.t(),
+          text: iodata(),
           tool_slots: %{non_neg_integer() => map()},
           input_tokens: non_neg_integer(),
           output_tokens: non_neg_integer(),
@@ -69,9 +71,11 @@ defmodule MiniAgent.LLM.DeepSeekStreamParser do
   @doc "Convert accumulated parser state to an internal Anthropic-like response map."
   @spec to_response(t()) :: map()
   def to_response(%__MODULE__{} = s) do
+    text = IO.iodata_to_binary(s.text)
+
     text_block =
-      if s.text != "" do
-        [%{"type" => "text", "text" => s.text}]
+      if text != "" do
+        [%{"type" => "text", "text" => text}]
       else
         []
       end
@@ -81,7 +85,7 @@ defmodule MiniAgent.LLM.DeepSeekStreamParser do
       |> Enum.sort_by(fn {idx, _} -> idx end)
       |> Enum.map(fn {_idx, slot} ->
         input =
-          case Jason.decode(slot.args_acc) do
+          case Jason.decode(IO.iodata_to_binary(slot.args_acc)) do
             {:ok, map} when is_map(map) -> map
             _ -> %{}
           end
@@ -124,7 +128,7 @@ defmodule MiniAgent.LLM.DeepSeekStreamParser do
   # text content delta
   defp apply_delta(state, %{"content" => chunk})
        when is_binary(chunk) and chunk != "" do
-    {%{state | text: state.text <> chunk}, {:text, chunk}}
+    {%{state | text: [state.text, chunk]}, {:text, chunk}}
   end
 
   # tool_calls delta - one or more tool_call increments in one chunk
@@ -132,12 +136,12 @@ defmodule MiniAgent.LLM.DeepSeekStreamParser do
     new_slots =
       Enum.reduce(tc_deltas, state.tool_slots, fn delta, slots ->
         idx = delta["index"] || 0
-        current = Map.get(slots, idx, %{id: "", name: "", args_acc: ""})
+        current = Map.get(slots, idx, %{id: "", name: "", args_acc: []})
 
         updated = %{
           id: delta["id"] || current.id,
           name: get_in(delta, ["function", "name"]) || current.name,
-          args_acc: current.args_acc <> (get_in(delta, ["function", "arguments"]) || "")
+          args_acc: [current.args_acc, get_in(delta, ["function", "arguments"]) || ""]
         }
 
         Map.put(slots, idx, updated)

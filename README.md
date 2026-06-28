@@ -50,6 +50,8 @@ flowchart TD
     PERM --> TOOLS["MiniAgent.Tools\ndispatcher"]
     TOOLS --> FT["FileTool\nread/write/list"]
     TOOLS --> ST["ShellTool\nwhitelist exec"]
+    FT --> SB["Sandbox\nsymlink-aware\npath confinement"]
+    ST --> SB
     TOOLS -->|delegate tool| ORC
     TOOLS -->|"telemetry incl. session_id"| BC
     ORC -->|"telemetry incl. session_id"| BC
@@ -81,9 +83,10 @@ lib/
     permission.ex                # :auto | :ask | :readonly gate
     tools.ex                     # Tool registry and dispatcher (execute/3 + ToolContext)
     tools/
-      context.ex                 # ToolContext struct - mode + workspace + session_id
+      context.ex                 # ToolContext struct - mode + workspace + session_id + llm_module
       file_tool.ex               # read_file (with offset), write_file, list_dir
-      shell_tool.ex              # Whitelisted shell commands
+      sandbox.ex                 # Shared path-confinement logic (symlink-aware boundary)
+      shell_tool.ex              # Whitelisted shell commands, sandboxed via Sandbox module
     sub_agent.ex                 # Lightweight pure-function agent loop
     orchestrator.ex              # plan -> parallel fan-out -> synthesize
     telemetry.ex                 # Sole location for log output to console
@@ -258,6 +261,7 @@ override it without recompiling.
 | `:compress_token_threshold` | `8_000` | Tokens consumed before context compression fires |
 | `:workspace` | `File.cwd!()` | Sandbox root - all file/shell ops restricted to this path. Overridable at runtime via `--workspace` flag |
 | `:llm_module` | `MiniAgent.LLM.DeepSeek` | LLM implementation module |
+| `:shell_whitelist` | `~w[ls cat grep find wc head tail echo mix git rg fd bat]` | Allowed shell commands |
 | `:checkpoint_dir` | `".mini_agent/checkpoints"` | Directory for checkpoint JSON files (relative to cwd) |
 
 Available `:llm_module` values:
@@ -445,7 +449,7 @@ truncation hint.
 ### Shell Tool Whitelist
 
 ```
-cat  echo  find  git  grep  head  ls  mix  tail  wc
+cat  echo  find  git  grep  head  ls  mix  tail  wc  rg  fd  bat
 ```
 
 All commands are sandboxed to `:workspace`. Output is capped at 4 000 bytes.
@@ -634,6 +638,7 @@ mix test                                                          # all tests
 mix test test/mini_agent_test.exs                                 # integration tests only
 mix test test/mini_agent/budget_test.exs                          # unit tests for a single module
 mix test test/mini_agent/checkpoint_test.exs                      # checkpoint save/load/list/delete
+mix test test/mini_agent/tools/sandbox_test.exs                   # Sandbox path confinement unit tests
 mix test test/mini_agent/llm/retry_test.exs                       # retry backoff unit tests
 mix test test/mini_agent/llm/anthropic_stream_parser_test.exs     # Anthropic SSE parser unit tests
 mix test test/mini_agent/llm/deepseek_stream_parser_test.exs      # DeepSeek SSE parser unit tests
@@ -651,6 +656,7 @@ Test categories:
 | `memory_test.exs` | Unit | Threshold logic, compression path, tool_use/tool_result boundary safety |
 | `permission_test.exs` | Unit | `:auto` and `:readonly` modes |
 | `tools_test.exs` | Unit | Dispatcher, file read/write/offset pagination in tmp/ |
+| `tools/sandbox_test.exs` | Unit | Path confinement, symlink resolution, boundary checks |
 | `llm_test.exs` | Unit | `extract_text`, `extract_tool_calls`, `usage` for Anthropic |
 | `llm/deepseek_test.exs` | Unit | `extract_text`, `extract_tool_calls`, `usage` for DeepSeek |
 | `llm/retry_test.exs` | Unit | Retryable vs non-retryable errors, max retries, backoff call count |
@@ -681,4 +687,6 @@ Test categories:
 | 14 | :ask + --parallel safety - downgrade to :readonly, emit telemetry | Done |
 | 15 | Phoenix LiveView web UI - streaming output, activity feed (single + parallel), mode/parallel/workspace options, session resume | Done |
 | 16 | Parallel mode real-time Activity feed - sub-agent plan/start/done/synthesize events | Done |
-| 17 | MCP integration (Model Context Protocol tools) | Planned |
+| 17 | Sandbox path confinement - shared symlink-aware boundary for FileTool and ShellTool | Done |
+| 18 | Finch HTTP adapter - connection pooling for LLM API calls | Done |
+| 19 | MCP integration (Model Context Protocol tools) | Planned |

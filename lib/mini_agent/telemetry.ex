@@ -12,7 +12,8 @@ defmodule MiniAgent.Telemetry do
     [:mini_agent, :budget, :exceeded],
     [:mini_agent, :memory, :compressed],
     [:mini_agent, :iteration, :start],
-    [:mini_agent, :orchestrator, :total_spend]
+    [:mini_agent, :orchestrator, :total_spend],
+    [:mini_agent, :orchestrator, :ask_downgraded]
   ]
 
   @doc "Attach all handlers. Called once from Application.start/2."
@@ -45,6 +46,10 @@ defmodule MiniAgent.Telemetry do
   def handle_event([:mini_agent, :iteration, :start], %{iteration: i}, _m, _) do
     sep = String.duplicate("-", 50)
     IO.puts("\n#{sep}\nIteration #{i}\n#{sep}")
+  end
+
+  def handle_event([:mini_agent, :orchestrator, :ask_downgraded], _m, %{reason: reason}, _) do
+    IO.puts("[orchestrator] :ask mode downgraded to :readonly (#{reason})")
   end
 
   def handle_event([:mini_agent, :orchestrator, :total_spend], m, _meta, _) do

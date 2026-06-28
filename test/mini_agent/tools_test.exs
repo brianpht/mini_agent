@@ -182,5 +182,29 @@ defmodule MiniAgent.ToolsTest do
       assert result =~ "Error"
       assert result =~ "command"
     end
+
+    test "rejects a whitelisted command whose argument escapes the workspace" do
+      result = Tools.execute("shell", %{"command" => "cat ../../etc/passwd"}, ctx())
+      assert result =~ "outside workspace"
+    end
+  end
+
+  describe "execute/3 - workspace sandbox (security regression)" do
+    test "read_file rejects a relative traversal" do
+      result = Tools.execute("read_file", %{"path" => "../../etc/passwd"}, ctx())
+      assert result =~ "outside workspace"
+    end
+
+    test "write_file rejects an absolute path outside the workspace" do
+      result =
+        Tools.execute(
+          "write_file",
+          %{"path" => "/etc/mini_agent_should_not_write", "content" => "x"},
+          ctx()
+        )
+
+      assert result =~ "outside workspace"
+      refute File.exists?("/etc/mini_agent_should_not_write")
+    end
   end
 end

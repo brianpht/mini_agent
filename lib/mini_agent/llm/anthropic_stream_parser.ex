@@ -17,18 +17,21 @@ defmodule MiniAgent.LLM.AnthropicStreamParser do
   Anthropic response format so the agent loop can reuse the same logic.
   """
 
-  defstruct text: "",
+  # text/current_json accumulate as IO lists (O(1) appends) and are flattened to
+  # a binary once in to_response/1. tool_calls is built in reverse and reversed
+  # at the end. This avoids quadratic binary/list rebuilding on long streams.
+  defstruct text: [],
             tool_calls: [],
             current_tool: nil,
-            current_json: "",
+            current_json: [],
             usage: 0,
             stop_reason: nil
 
   @type t :: %__MODULE__{
-          text: String.t(),
+          text: iodata(),
           tool_calls: list(map()),
           current_tool: map() | nil,
-          current_json: String.t(),
+          current_json: iodata(),
           usage: non_neg_integer(),
           stop_reason: String.t() | nil
         }
@@ -57,15 +60,19 @@ defmodule MiniAgent.LLM.AnthropicStreamParser do
   @doc "Convert accumulated parser state to an Anthropic-compatible response map."
   @spec to_response(t()) :: map()
   def to_response(%__MODULE__{} = s) do
+    text = IO.iodata_to_binary(s.text)
+
     text_block =
-      if s.text != "" do
-        [%{"type" => "text", "text" => s.text}]
+      if text != "" do
+        [%{"type" => "text", "text" => text}]
       else
         []
       end
 
     tool_blocks =
-      Enum.map(s.tool_calls, fn t ->
+      s.tool_calls
+      |> Enum.reverse()
+      |> Enum.map(fn t ->
         %{
           "type" => "tool_use",
           "id" => t["id"],
@@ -91,7 +98,7 @@ defmodule MiniAgent.LLM.AnthropicStreamParser do
          "content_block" => %{"type" => "tool_use", "id" => id, "name" => name}
        }) do
     tool = %{"id" => id, "name" => name, "input" => %{}}
-    {%{state | current_tool: tool, current_json: ""}, :none}
+    {%{state | current_tool: tool, current_json: []}, :none}
   end
 
   defp handle_event(state, %{"type" => "content_block_start"}), do: {state, :none}
@@ -101,7 +108,7 @@ defmodule MiniAgent.LLM.AnthropicStreamParser do
          "type" => "content_block_delta",
          "delta" => %{"type" => "text_delta", "text" => chunk}
        }) do
-    {%{state | text: state.text <> chunk}, {:text, chunk}}
+    {%{state | text: [state.text, chunk]}, {:text, chunk}}
   end
 
   # tool input json: accumulate partial JSON (do not parse yet)
@@ -109,7 +116,7 @@ defmodule MiniAgent.LLM.AnthropicStreamParser do
          "type" => "content_block_delta",
          "delta" => %{"type" => "input_json_delta", "partial_json" => part}
        }) do
-    {%{state | current_json: state.current_json <> part}, :none}
+    {%{state | current_json: [state.current_json, part]}, :none}
   end
 
   defp handle_event(state, %{"type" => "content_block_delta"}), do: {state, :none}
@@ -118,7 +125,7 @@ defmodule MiniAgent.LLM.AnthropicStreamParser do
   defp handle_event(%{current_tool: tool} = state, %{"type" => "content_block_stop"})
        when not is_nil(tool) do
     input =
-      case Jason.decode(state.current_json) do
+      case Jason.decode(IO.iodata_to_binary(state.current_json)) do
         {:ok, map} -> map
         {:error, _} -> %{}
       end
@@ -127,9 +134,9 @@ defmodule MiniAgent.LLM.AnthropicStreamParser do
 
     new_state = %{
       state
-      | tool_calls: state.tool_calls ++ [finished],
+      | tool_calls: [finished | state.tool_calls],
         current_tool: nil,
-        current_json: ""
+        current_json: []
     }
 
     {new_state, :none}
